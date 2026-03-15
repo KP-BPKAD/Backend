@@ -16,7 +16,15 @@ const PORT = process.env.PORT || 5000;
 connectDB();
 
 // === 2. MIDDLEWARE UMUM (WAJIB DI ATAS ROUTE) ===
-app.use(cors()); // ← CORS pertama
+app.use(cors({
+  origin: [
+    "https://frontend-vgl8keds0-thorixrovers-projects.vercel.app",
+    "https://frontend-beige-phi-75.vercel.app",
+    "https://frontend-git-main-thorixrovers-projects.vercel.app",
+    "http://localhost:3000"
+  ],
+  credentials: true
+})); // ← CORS pertama
 app.use(helmet()); // keamanan header
 app.use(express.json({ limit: '10mb' })); // parse JSON
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // file statis
