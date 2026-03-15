@@ -18,9 +18,7 @@ connectDB();
 // === 2. MIDDLEWARE UMUM (WAJIB DI ATAS ROUTE) ===
 app.use(cors({
   origin: [
-    "https://frontend-vgl8keds0-thorixrovers-projects.vercel.app",
-    "https://frontend-beige-phi-75.vercel.app",
-    "https://frontend-git-main-thorixrovers-projects.vercel.app",
+    "https://frontend-ten-nu-27.vercel.app",
     "http://localhost:3000"
   ],
   credentials: true
