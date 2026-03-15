@@ -16,13 +16,7 @@ const PORT = process.env.PORT || 5000;
 connectDB();
 
 // === 2. MIDDLEWARE UMUM (WAJIB DI ATAS ROUTE) ===
-app.use(cors({
-  origin: [
-    "https://frontend-ten-nu-27.vercel.app",
-    "http://localhost:3000"
-  ],
-  credentials: true
-})); // ← CORS pertama
+app.use(cors());// ← CORS pertama
 app.use(helmet()); // keamanan header
 app.use(express.json({ limit: '10mb' })); // parse JSON
 app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // file statis
