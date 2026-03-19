@@ -168,41 +168,39 @@ router.get('/masuk/search', auth, async (req, res) => {
   }
 });
 
-// 🔍 7. Detail surat (selalu ambil dari outgoing agar biodata muncul)
+// 🔍 7. Detail surat - Versi Perbaikan
 router.get('/:id', auth, async (req, res) => {
   try {
     // Ambil surat berdasarkan ID
-    const letter = await Letter.findById(req.params.id);
-    if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
+    let letter = await Letter.findById(req.params.id)
+      .populate('pengirimId', 'email')
+      .populate('penerimaId', 'email')
+      .populate('klasifikasiId', 'nama warna'); // Populate juga klasifikasi di sini
 
-    // Cari salinan 'outgoing' dengan suratId yang sama agar biodata muncul
-    const outgoingLetter = await Letter.findOne({
-      suratId: letter.suratId,
-      type: 'outgoing'
-    }).populate('pengirimId', 'email')
-      .populate('penerimaId', 'email')   // ✅ Tambahkan ini
-      .populate('klasifikasiId', 'nama warna');
-
-    if (!outgoingLetter) {
-      return res.status(404).json({ message: 'Salinan pengirim tidak ditemukan.' });
+    if (!letter) {
+      console.log(`Surat dengan ID ${req.params.id} tidak ditemukan.`);
+      return res.status(404).json({ message: 'Surat tidak ditemukan.' });
     }
 
     // Pastikan user adalah pengirim atau penerima
-    const isSender = outgoingLetter.ownerId.toString() === req.user.id.toString();
-    const isReceiver = letter.ownerId.toString() === req.user.id.toString();
+    const isSender = letter.pengirimId && letter.pengirimId._id.toString() === req.user.id.toString();
+    const isReceiver = letter.penerimaId && letter.penerimaId._id.toString() === req.user.id.toString();
 
     if (!isSender && !isReceiver) {
+      console.log(`Akses ditolak untuk user ${req.user.id} ke surat ${req.params.id}`);
       return res.status(403).json({ message: 'Akses ditolak.' });
     }
 
     // Log akses detail surat (opsional)
-    const { logActivity } = require('../utils/logActivity');
-    await logActivity(req.user.id, 'view_letter_detail', `User melihat detail surat "${letter.noSurat}"`, req);
+    // const { logActivity } = require('../utils/logActivity');
+    // await logActivity(req.user.id, 'view_letter_detail', `User melihat detail surat "${letter.noSurat}"`, req);
 
-    res.json(outgoingLetter); // Kirim salinan outgoing agar biodata muncul
+    // Kirim data surat yang ditemukan (bisa incoming atau outgoing)
+    res.json(letter);
+
   } catch (err) {
     console.error('Error di /letters/:id:', err);
-    res.status(500).json({ message: 'Gagal mengambil detail surat.' });
+    res.status(500).json({ message: 'Gagal mengambil detail surat.', error: err.message });
   }
 });
 
