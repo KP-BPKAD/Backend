@@ -1,335 +1,436 @@
-// routes/letterRoutes.js
-const express = require('express');
-const multer = require('multer');
-const path = require('path');
-const Letter = require('../models/Letter');
-const User = require('../models/User'); // ← tambahkan jika belum ada
-const auth = require('../middleware/auth');
-const admin = require('../middleware/admin');
-const archiver = require('archiver');
-const fs = require('fs');
+// src/components/LetterForm.js
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import api from '../services/api';
+import { Container, Form, Button, Row, Col, Card, Alert } from 'react-bootstrap';
 
-const router = express.Router();
+const LetterForm = ({ isEdit = false, isView = false }) => {
+  const { id } = useParams();
+  const navigate = useNavigate();
 
-// Setup multer
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/');
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
+  const [formData, setFormData] = useState({
+    noUrut: '',
+    noSurat: '',
+    tanggalTerima: new Date().toISOString().split('T')[0],
+    tanggalDisposisi: '',
+    asalSurat: '',
+    perihal: '',
+    keterangan: '',
+    tanggalDisposisiBidang: '',
+    jabatan: '',
+    nama: '',
+    nip: '',
+    penerimaEmail: '',
+    klasifikasiId: '',
+    arsipDigital: ''
+  });
 
-const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 }
-});
+  const [file, setFile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false); // 🔒 proteksi double-submit
+  const [error, setError] = useState('');
+  const [classifications, setClassifications] = useState([]);
 
-// 🔑 1. Route ADMIN: lihat semua surat — filter unik berdasarkan suratId
-router.get('/all', auth, admin, async (req, res) => {
-  try {
-    const allLetters = await Letter.find()
-      .populate('pengirimId', 'email')
-      .populate('penerimaId', 'email');
+  // Fetch data hanya jika edit atau view
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const classRes = await api.get('/classifications');
+        setClassifications(classRes.data);
 
-    // Filter unik: satu baris per suratId (ambil yang terbaru)
-    const uniqueMap = {};
-    allLetters.forEach(letter => {
-      if (!uniqueMap[letter.suratId] || letter.createdAt > uniqueMap[letter.suratId].createdAt) {
-        uniqueMap[letter.suratId] = letter;
+        if ((isEdit || isView) && id) {
+          const res = await api.get(`/letters/${id}`);
+          const letter = res.data;
+
+          const jabatan = letter.jabatan || letter.pengirimId?.jabatan || '';
+          const nama = letter.nama || letter.pengirimId?.nama || '';
+          const nip = letter.nip || letter.pengirimId?.nip || '';
+
+          setFormData({
+            noUrut: letter.noUrut,
+            noSurat: letter.noSurat,
+            tanggalTerima: letter.tanggalTerima?.split('T')[0] || '',
+            tanggalDisposisi: letter.tanggalDisposisi?.split('T')[0] || '',
+            asalSurat: letter.asalSurat || '',
+            perihal: letter.perihal || '',
+            keterangan: letter.keterangan || '',
+            tanggalDisposisiBidang: letter.tanggalDisposisiBidang?.split('T')[0] || '',
+            jabatan,
+            nama,
+            nip,
+            penerimaEmail: letter.penerimaId?.email || '',
+            klasifikasiId: letter.klasifikasiId && typeof letter.klasifikasiId === 'object'
+              ? letter.klasifikasiId._id || letter.klasifikasiId
+              : letter.klasifikasiId || '',
+            arsipDigital: letter.arsipDigital || ''
+          });
+        }
+      } catch (err) {
+        console.error('Gagal memuat data surat:', err);
+        alert('Gagal memuat data surat');
+        navigate('/dashboard');
       }
-    });
-    const uniqueLetters = Object.values(uniqueMap);
+    };
+    fetchData();
+  }, [id, isEdit, isView, navigate]);
 
-    res.json(uniqueLetters);
-  } catch (err) {
-    console.error('Error di /letters/all:', err);
-    res.status(500).json({ message: 'Gagal mengambil data surat.' });
-  }
-});
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({
+      ...prev,
+      [name]: value
+    }));
+    if (error) setError('');
+  };
 
-// 📤 2. Kirim surat (CREATE)
-router.post('/', auth, upload.single('arsipDigital'), async (req, res) => {
-  try {
-    const { createLetter } = require('../controllers/letterController');
-    return createLetter(req, res);
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal mengirim surat.' });
-  }
-});
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (loading || isSubmitting) return; // 🔒 Double-submit protection
+    setIsSubmitting(true);
+    setError('');
+    setLoading(true);
 
-// 📥 3. Surat MASUK (untuk penerima)
-router.get('/masuk', auth, async (req, res) => {
-  try {
-    const { getIncomingLetters } = require('../controllers/letterController');
-    return getIncomingLetters(req, res);
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal mengambil surat masuk.' });
-  }
-});
+    try {
+      const formPayload = new FormData();
+      Object.entries(formData).forEach(([key, value]) => {
+        formPayload.append(key, value);
+      });
+      if (file) formPayload.append('arsipDigital', file);
 
-// 📤 4. Surat KELUAR (untuk pengirim)
-router.get('/keluar', auth, async (req, res) => {
-  try {
-    const { getOutgoingLetters } = require('../controllers/letterController');
-    return getOutgoingLetters(req, res);
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal mengambil surat keluar.' });
-  }
-});
-
-// 📥 5. Surat KELUAR (untuk pengirim) - PENCARIAN — filter unik
-router.get('/keluar/search', auth, async (req, res) => {
-  try {
-    const { q, startDate, endDate, classificationId } = req.query;
-    let filter = { pengirimId: req.user.id };
-
-    if (q) {
-      filter.$or = [
-        { noSurat: { $regex: q, $options: 'i' } },
-        { perihal: { $regex: q, $options: 'i' } },
-        { asalSurat: { $regex: q, $options: 'i' } }
-      ];
-    }
-
-    if (startDate || endDate) {
-      filter.tanggalTerima = {};
-      if (startDate) filter.tanggalTerima.$gte = new Date(startDate);
-      if (endDate) filter.tanggalTerima.$lte = new Date(endDate);
-    }
-
-    if (classificationId) {
-      filter.klasifikasiId = classificationId;
-    }
-
-    const allLetters = await Letter.find(filter)
-      .populate('penerimaId', 'email')
-      .populate('klasifikasiId', 'nama warna')
-      .sort({ createdAt: -1 });
-
-    // ✅ Filter unik berdasarkan suratId (ambil yang terbaru)
-    const uniqueMap = {};
-    allLetters.forEach(letter => {
-      if (!uniqueMap[letter.suratId] || letter.createdAt > uniqueMap[letter.suratId].createdAt) {
-        uniqueMap[letter.suratId] = letter;
+      if (isEdit) {
+        await api.put(`/letters/${id}`, formPayload);
+        alert('Surat berhasil diperbarui!');
+      } else {
+        await api.post('/letters', formPayload);
+        alert('Surat berhasil dikirim!');
       }
-    });
-    const uniqueLetters = Object.values(uniqueMap);
-
-    res.json(uniqueLetters);
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal mencari surat keluar.' });
-  }
-});
-
-// 📥 6. Surat MASUK (untuk penerima) - PENCARIAN — filter unik
-router.get('/masuk/search', auth, async (req, res) => {
-  try {
-    const { q, startDate, endDate, classificationId } = req.query;
-    let filter = { penerimaId: req.user.id };
-
-    if (q) {
-      filter.$or = [
-        { noSurat: { $regex: q, $options: 'i' } },
-        { perihal: { $regex: q, $options: 'i' } },
-        { asalSurat: { $regex: q, $options: 'i' } }
-      ];
+      navigate('/dashboard');
+    } catch (err) {
+      const msg = err.response?.data?.message || 'Gagal menyimpan surat';
+      setError(msg);
+      console.error('Submit error:', err);
+    } finally {
+      setLoading(false);
+      setIsSubmitting(false);
     }
+  };
 
-    if (startDate || endDate) {
-      filter.tanggalTerima = {};
-      if (startDate) filter.tanggalTerima.$gte = new Date(startDate);
-      if (endDate) filter.tanggalTerima.$lte = new Date(endDate);
-    }
+  // Mode VIEW
+  if (isView) {
+    const handleDownload = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        if (!token) {
+          alert('Silakan login ulang.');
+          return;
+        }
 
-    if (classificationId) {
-      filter.klasifikasiId = classificationId;
-    }
+        const response = await fetch(
+          `http://localhost:5000/api/letters/${id}/download`,
+          {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${token}` }
+          }
+        );
 
-    const allLetters = await Letter.find(filter)
-      .populate('pengirimId', 'email')
-      .populate('klasifikasiId', 'nama warna')
-      .sort({ createdAt: -1 });
+        if (!response.ok) {
+          const error = await response.json();
+          alert(error.message || 'Gagal mengunduh surat.');
+          return;
+        }
 
-    // ✅ Filter unik berdasarkan suratId (ambil yang terbaru)
-    const uniqueMap = {};
-    allLetters.forEach(letter => {
-      if (!uniqueMap[letter.suratId] || letter.createdAt > uniqueMap[letter.suratId].createdAt) {
-        uniqueMap[letter.suratId] = letter;
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `surat_${formData.noSurat.replace(/\//g, '_')}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        alert('Surat + data berhasil diunduh!');
+      } catch (err) {
+        console.error('Download error:', err);
+        alert('Gagal mengunduh. Coba lagi nanti.');
       }
-    });
-    const uniqueLetters = Object.values(uniqueMap);
+    };
 
-    res.json(uniqueLetters);
-  } catch (err) {
-    res.status(500).json({ message: 'Gagal mencari surat masuk.' });
+    return (
+      <Container className="mt-4">
+        <Card>
+          <Card.Body>
+            <Card.Title>Detail Surat</Card.Title>
+
+            {formData.arsipDigital && (
+              <div className="mb-4">
+                <h5>Arsip Digital</h5>
+                <Alert variant="info">
+                  <strong>File:</strong> {formData.arsipDigital.split('/').pop()}
+                  <br />
+                  <a 
+                    href={`http://localhost:5000${formData.arsipDigital}`} 
+                    target="_blank"
+                    rel="noreferrer"
+                    className="btn btn-sm btn-primary mt-2"
+                  >
+                    📄 Buka File di Tab Baru
+                  </a>
+                </Alert>
+              </div>
+            )}
+
+            <Row>
+              <Col md={6}>
+                <p><strong>No Urut:</strong> {formData.noUrut}</p>
+                <p><strong>No Surat:</strong> {formData.noSurat}</p>
+                <p><strong>Tanggal Terima:</strong> {new Date(formData.tanggalTerima).toLocaleDateString()}</p>
+                <p><strong>Tanggal Disposisi:</strong> {formData.tanggalDisposisi ? new Date(formData.tanggalDisposisi).toLocaleDateString() : '-'}</p>
+                <p><strong>Asal Surat:</strong> {formData.asalSurat}</p>
+                <p><strong>Penerima:</strong> {formData.penerimaEmail || '–'}</p>
+                <p><strong>Klasifikasi:</strong> 
+                  {formData.klasifikasiId && (
+                    classifications.find(cls => cls._id === formData.klasifikasiId) ? (
+                      <span 
+                        className="badge"
+                        style={{ 
+                          backgroundColor: classifications.find(cls => cls._id === formData.klasifikasiId)?.warna || '#007bff',
+                          color: '#fff'
+                        }}
+                      >
+                        {classifications.find(cls => cls._id === formData.klasifikasiId)?.nama || 'Tanpa Nama'}
+                      </span>
+                    ) : (
+                      <span className="text-muted">-</span>
+                    )
+                  )}
+                </p>
+              </Col>
+              <Col md={6}>
+                <p><strong>Perihal:</strong> {formData.perihal}</p>
+                <p><strong>Keterangan:</strong> {formData.keterangan}</p>
+                <p><strong>Tgl Disposisi Bidang:</strong> {formData.tanggalDisposisiBidang ? new Date(formData.tanggalDisposisiBidang).toLocaleDateString() : '-'}</p>
+                <p><strong>Jabatan:</strong> {formData.jabatan}</p>
+                <p><strong>Nama:</strong> {formData.nama}</p>
+                <p><strong>NIP:</strong> {formData.nip}</p>
+              </Col>
+            </Row>
+
+            <div className="mt-3">
+              <Button variant="secondary" onClick={() => navigate(-1)}>
+                Kembali
+              </Button>{' '}
+              <Button variant="success" onClick={handleDownload}>
+                Unduh Surat & Data
+              </Button>
+            </div>
+          </Card.Body>
+        </Card>
+      </Container>
+    );
   }
-});
 
-// 🔍 7. Detail surat (selalu ambil dari outgoing agar biodata muncul)
-router.get('/:id', auth, async (req, res) => {
-  try {
-    // Ambil surat berdasarkan ID
-    const letter = await Letter.findById(req.params.id);
-    if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
+  // Mode CREATE / EDIT
+  return (
+    <Container className="mt-4">
+      <Card>
+        <Card.Body>
+          <Card.Title>{isEdit ? 'Edit Surat' : 'Kirim Surat Baru'}</Card.Title>
+          {error && <Alert variant="danger">{error}</Alert>}
+          <Form onSubmit={handleSubmit}>
+            <Row>
+              <Col md={6}>
+                <Form.Group className="mb-3">
+                  <Form.Label>No Urut</Form.Label>
+                  <Form.Control
+                    type="number"
+                    name="noUrut"
+                    value={formData.noUrut}
+                    onChange={handleChange}
+                    required
+                    min="1"
+                  />
+                </Form.Group>
+              </Col>
+              <Col md={6}>
+                <Form.Group className="mb-3">
+                  <Form.Label>No Surat</Form.Label>
+                  <Form.Control
+                    type="text"
+                    name="noSurat"
+                    value={formData.noSurat}
+                    onChange={handleChange}
+                    required
+                  />
+                </Form.Group>
+              </Col>
+            </Row>
 
-    // Cari salinan 'outgoing' dengan suratId yang sama agar biodata muncul
-    const outgoingLetter = await Letter.findOne({
-      suratId: letter.suratId,
-      type: 'outgoing'
-    }).populate('pengirimId', 'email')
-      .populate('penerimaId', 'email')   // ✅ Tambahkan ini
-      .populate('klasifikasiId', 'nama warna');
+            <Row>
+              <Col md={6}>
+                <Form.Group className="mb-3">
+                  <Form.Label>Tanggal Terima</Form.Label>
+                  <Form.Control
+                    type="date"
+                    name="tanggalTerima"
+                    value={formData.tanggalTerima}
+                    onChange={handleChange}
+                    required
+                  />
+                </Form.Group>
+              </Col>
+              <Col md={6}>
+                <Form.Group className="mb-3">
+                  <Form.Label>Tanggal Disposisi</Form.Label>
+                  <Form.Control
+                    type="date"
+                    name="tanggalDisposisi"
+                    value={formData.tanggalDisposisi}
+                    onChange={handleChange}
+                  />
+                </Form.Group>
+              </Col>
+            </Row>
 
-    if (!outgoingLetter) {
-      return res.status(404).json({ message: 'Salinan pengirim tidak ditemukan.' });
-    }
+            <Form.Group className="mb-3">
+              <Form.Label>Asal Surat</Form.Label>
+              <Form.Control
+                type="text"
+                name="asalSurat"
+                value={formData.asalSurat}
+                onChange={handleChange}
+                required
+              />
+            </Form.Group>
 
-    // Pastikan user adalah pengirim atau penerima
-    const isSender = outgoingLetter.ownerId.toString() === req.user.id.toString();
-    const isReceiver = letter.ownerId.toString() === req.user.id.toString();
+            <Form.Group className="mb-3">
+              <Form.Label>Perihal</Form.Label>
+              <Form.Control
+                type="text"
+                name="perihal"
+                value={formData.perihal}
+                onChange={handleChange}
+                required
+              />
+            </Form.Group>
 
-    if (!isSender && !isReceiver) {
-      return res.status(403).json({ message: 'Akses ditolak.' });
-    }
+            <Form.Group className="mb-3">
+              <Form.Label>Keterangan</Form.Label>
+              <Form.Control
+                as="textarea"
+                rows={3}
+                name="keterangan"
+                value={formData.keterangan}
+                onChange={handleChange}
+              />
+            </Form.Group>
 
-    // Log akses detail surat (opsional)
-    const { logActivity } = require('../utils/logActivity');
-    await logActivity(req.user.id, 'view_letter_detail', `User melihat detail surat "${letter.noSurat}"`, req);
+            <Form.Group className="mb-3">
+              <Form.Label>Tanggal Disposisi Bidang</Form.Label>
+              <Form.Control
+                type="date"
+                name="tanggalDisposisiBidang"
+                value={formData.tanggalDisposisiBidang}
+                onChange={handleChange}
+              />
+            </Form.Group>
 
-    res.json(outgoingLetter); // Kirim salinan outgoing agar biodata muncul
-  } catch (err) {
-    console.error('Error di /letters/:id:', err);
-    res.status(500).json({ message: 'Gagal mengambil detail surat.' });
-  }
-});
+            <Row>
+              <Col md={6}>
+                <Form.Group className="mb-3">
+                  <Form.Label>Jabatan</Form.Label>
+                  <Form.Control
+                    type="text"
+                    name="jabatan"
+                    value={formData.jabatan}
+                    onChange={handleChange}
+                    required
+                  />
+                </Form.Group>
+              </Col>
+              <Col md={6}>
+                <Form.Group className="mb-3">
+                  <Form.Label>Nama</Form.Label>
+                  <Form.Control
+                    type="text"
+                    name="nama"
+                    value={formData.nama}
+                    onChange={handleChange}
+                    required
+                  />
+                </Form.Group>
+              </Col>
+            </Row>
 
-// ✏️ 8. Edit surat (hanya pengirim atau admin)
-router.put('/:id', auth, upload.single('arsipDigital'), async (req, res) => {
-  try {
-    const { updateLetter } = require('../controllers/letterController');
-    return updateLetter(req, res);
-  } catch (err) {
-    console.error('Error update surat via route:', err);
-    res.status(500).json({ message: 'Gagal memperbarui surat.' });
-  }
-});
+            <Form.Group className="mb-3">
+              <Form.Label>NIP</Form.Label>
+              <Form.Control
+                type="text"
+                name="nip"
+                value={formData.nip}
+                onChange={handleChange}
+                required
+                pattern="\d{9,20}"
+                title="NIP harus 9–20 digit angka"
+              />
+            </Form.Group>
 
-// 🗑️ 9. Hapus surat (hanya pengirim atau admin)
-router.delete('/:id', auth, async (req, res) => {
-  try {
-    const { deleteLetter } = require('../controllers/letterController');
-    return deleteLetter(req, res);
-  } catch (err) {
-    console.error('Error hapus surat via route:', err);
-    res.status(500).json({ message: 'Gagal menghapus surat.' });
-  }
-});
+            <Form.Group className="mb-3">
+              <Form.Label>Penerima Email *</Form.Label>
+              <Form.Control
+                type="email"
+                name="penerimaEmail"
+                placeholder="Masukkan email penerima yang terdaftar"
+                value={formData.penerimaEmail}
+                onChange={handleChange}
+                required={!isEdit}
+                disabled={isEdit}
+              />
+              <Form.Text className="text-muted">
+                Pastikan penerima sudah terdaftar di sistem.
+              </Form.Text>
+            </Form.Group>
 
-// 🔥 ADMIN: Edit surat milik siapa pun
-router.put('/admin/:id', auth, admin, upload.single('arsipDigital'), async (req, res) => {
-  try {
-    const { adminUpdateLetter } = require('../controllers/letterController');
-    return adminUpdateLetter(req, res);
-  } catch (err) {
-    console.error('Error admin update surat via route:', err);
-    res.status(500).json({ message: 'Gagal memperbarui surat.' });
-  }
-});
+            <Form.Group className="mb-3">
+              <Form.Label>Klasifikasi Arsip</Form.Label>
+              <Form.Select
+                name="klasifikasiId"
+                value={formData.klasifikasiId}
+                onChange={handleChange}
+              >
+                <option value="">-- Pilih Klasifikasi --</option>
+                {classifications.map(cls => (
+                  <option key={cls._id} value={cls._id}>
+                    {cls.nama}
+                  </option>
+                ))}
+              </Form.Select>
+              <Form.Text className="text-muted">
+                Pilih klasifikasi untuk mengelompokkan surat berdasarkan prioritas.
+              </Form.Text>
+            </Form.Group>
 
-// 🔥 ADMIN: Hapus surat milik siapa pun
-router.delete('/admin/:id', auth, admin, async (req, res) => {
-  try {
-    const { adminDeleteLetter } = require('../controllers/letterController');
-    return adminDeleteLetter(req, res);
-  } catch (err) {
-    console.error('Error admin hapus surat via route:', err);
-    res.status(500).json({ message: 'Gagal menghapus surat.' });
-  }
-});
+            <Form.Group className="mb-3">
+              <Form.Label>Arsip Digital (PDF/DOCX/XLSX)</Form.Label>
+              <Form.Control
+                type="file"
+                accept=".pdf,.docx,.xlsx"
+                onChange={(e) => setFile(e.target.files[0])}
+              />
+            </Form.Group>
 
-// 🔥 HAPUS PERMANEN: Semua role bisa hapus semua surat secara permanen - TANPA BATAS
-router.delete('/permanent/:id', auth, async (req, res) => {
-  try {
-    const { deleteLetterPermanent } = require('../controllers/letterController');
-    return deleteLetterPermanent(req, res);
-  } catch (err) {
-    console.error('Error hapus permanen via route:', err);
-    res.status(500).json({ message: 'Gagal menghapus surat secara permanen.' });
-  }
-});
+            <Button
+              variant="primary"
+              type="submit"
+              disabled={loading || isSubmitting}
+              className="w-100"
+            >
+              {loading || isSubmitting ? 'Memproses...' : isEdit ? 'Perbarui Surat' : 'Kirim Surat'}
+            </Button>
+          </Form>
+        </Card.Body>
+      </Card>
+    </Container>
+  );
+};
 
-// ⬇️ 10. Unduh surat + metadata (ZIP) - FIX KLASIFIKASI DI DOWNLOAD
-router.get('/:id/download', auth, async (req, res) => {
-  try {
-    let letter;
-
-    // Cek akses
-    if (req.user.role === 'admin') {
-      letter = await Letter.findById(req.params.id)
-        .populate('pengirimId', 'email')
-        .populate('penerimaId', 'email')
-        .populate('klasifikasiId', 'nama warna'); // ✅ FIX: Tambahkan populate
-    } else {
-      letter = await Letter.findOne({
-        _id: req.params.id,
-        $or: [
-          { pengirimId: req.user.id },
-          { penerimaId: req.user.id }
-        ]
-      })
-        .populate('pengirimId', 'email')
-        .populate('penerimaId', 'email')
-        .populate('klasifikasiId', 'nama warna'); // ✅ FIX: Tambahkan populate
-    }
-
-    if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
-
-    const filePath = path.join(__dirname, '..', letter.arsipDigital);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ message: 'File arsip tidak ditemukan.' });
-    }
-
-    const originalFileName = path.basename(letter.arsipDigital);
-    const zipName = `surat_${letter.noSurat.replace(/\//g, '_')}.zip`;
-
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
-
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.pipe(res);
-
-    // Tambahkan file asli
-    archive.file(filePath, { name: originalFileName });
-
-    // Tambahkan data surat - FIX KLASIFIKASI DI SINI
-    const dataText = `
-DATA SURAT
-==========
-No Urut            : ${letter.noUrut}
-No Surat           : ${letter.noSurat}
-Tanggal Terima     : ${new Date(letter.tanggalTerima).toLocaleDateString('id-ID')}
-Tanggal Disposisi  : ${letter.tanggalDisposisi ? new Date(letter.tanggalDisposisi).toLocaleDateString('id-ID') : '-'}
-Asal Surat         : ${letter.asalSurat}
-Perihal            : ${letter.perihal}
-Keterangan         : ${letter.keterangan}
-Tgl Disposisi Bidang: ${letter.tanggalDisposisiBidang ? new Date(letterisiBidang).toLocaleDateString('id-ID') : '-'}
-Jabatan            : ${letter.jabatan}
-Nama               : ${letter.nama}
-NIP                : ${letter.nip}
-Pengirim           : ${letter.pengirimId?.email || '–'}
-Penerima           : ${letter.penerimaId?.email || '–'}
-Klasifikasi        : ${letter.klasifikasiId?.nama || '–'}  
-`;
-    archive.append(dataText, { name: 'data_surat.txt' });
-
-    await archive.finalize();
-  } catch (err) {
-    console.error('Error download:', err);
-    res.status(500).json({ message: 'Gagal mengunduh surat.' });
-  }
-});
-
-module.exports = router;
+export default LetterForm;
