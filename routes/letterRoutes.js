@@ -1,22 +1,28 @@
 // routes/letterRoutes.js
 const express = require('express');
-const multer = require('multer');
 const path = require('path');
 const Letter = require('../models/Letter');
-const User = require('../models/User'); // ← tambahkan jika belum ada
+const User = require('../models/User');
 const auth = require('../middleware/auth');
 const admin = require('../middleware/admin');
 const archiver = require('archiver');
 const fs = require('fs');
+const cloudinary = require('cloudinary').v2; // ✅ Import Cloudinary
 
 const router = express.Router();
 
-// 🔧 INTEGRASI: Serve file statis dari folder uploads
+// 🔧 Konfigurasi Cloudinary dari environment variable
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
 
-// Setup multer
+// === SETUP MULTER (hanya untuk upload sementara ke temp file, lalu di-upload ke Cloudinary) ===
+const multer = require('multer');
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/');
+    cb(null, 'uploads/'); // Simpan sementara di local folder (untuk diupload ke Cloudinary)
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
@@ -26,7 +32,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 }
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
 });
 
 // 🔑 1. Route ADMIN: lihat semua surat — filter unik berdasarkan suratId
@@ -36,7 +42,6 @@ router.get('/all', auth, admin, async (req, res) => {
       .populate('pengirimId', 'email')
       .populate('penerimaId', 'email');
 
-    // Filter unik: satu baris per suratId (ambil yang terbaru)
     const uniqueMap = {};
     allLetters.forEach(letter => {
       if (!uniqueMap[letter.suratId] || letter.createdAt > uniqueMap[letter.suratId].createdAt) {
@@ -52,12 +57,55 @@ router.get('/all', auth, admin, async (req, res) => {
   }
 });
 
-// 📤 2. Kirim surat (CREATE)
+// 📤 2. Kirim surat (CREATE) — DENGAN CLOUDINARY
 router.post('/', auth, upload.single('arsipDigital'), async (req, res) => {
   try {
-    const { createLetter } = require('../controllers/letterController');
-    return createLetter(req, res);
+    const {
+      noUrut, noSurat, tanggalTerima, tanggalDisposisi, asalSurat, perihal,
+      keterangan, tanggalDisposisiBidang, jabatan, nama, nip, penerimaEmail,
+      klasifikasiId, arsipDigital // ini adalah field dari form, bukan file
+    } = req.body;
+
+    let arsipDigitalUrl = '';
+
+    // Upload file ke Cloudinary jika ada
+    if (req.file) {
+      try {
+        const result = await cloudinary.uploader.upload(req.file.path, {
+          folder: 'bpkad_surat',
+          resource_type: 'auto',
+          invalidate: true // agar URL baru selalu fresh
+        });
+        arsipDigitalUrl = result.secure_url; // ✅ Simpan URL publik
+      } catch (uploadErr) {
+        console.error('Cloudinary upload error:', uploadErr);
+        return res.status(500).json({ message: 'Gagal mengunggah file ke Cloudinary.' });
+      }
+    }
+
+    // Buat surat baru
+    const newLetter = new Letter({
+      noUrut,
+      noSurat,
+      tanggalTerima,
+      tanggalDisposisi,
+      asalSurat,
+      perihal,     
+      keterangan,
+      tanggalDisposisiBidang,
+      jabatan,
+      nama,
+      nip,
+      penerimaEmail,
+      klasifikasiId,
+      arsipDigital: arsipDigitalUrl, // ✅ Simpan URL, bukan path lokal
+      ownerId: req.user.id
+    });
+
+    await newLetter.save();
+    res.status(201).json(newLetter);
   } catch (err) {
+    console.error('Error di POST /letters:', err);
     res.status(500).json({ message: 'Gagal mengirim surat.' });
   }
 });
@@ -65,8 +113,11 @@ router.post('/', auth, upload.single('arsipDigital'), async (req, res) => {
 // 📥 3. Surat MASUK (untuk penerima)
 router.get('/masuk', auth, async (req, res) => {
   try {
-    const { getIncomingLetters } = require('../controllers/letterController');
-    return getIncomingLetters(req, res);
+    const letters = await Letter.find({ penerimaId: req.user.id })
+      .populate('pengirimId', 'email')
+      .populate('klasifikasiId', 'nama warna')
+      .sort({ createdAt: -1 });
+    res.json(letters);
   } catch (err) {
     res.status(500).json({ message: 'Gagal mengambil surat masuk.' });
   }
@@ -75,14 +126,17 @@ router.get('/masuk', auth, async (req, res) => {
 // 📤 4. Surat KELUAR (untuk pengirim)
 router.get('/keluar', auth, async (req, res) => {
   try {
-    const { getOutgoingLetters } = require('../controllers/letterController');
-    return getOutgoingLetters(req, res);
+    const letters = await Letter.find({ pengirimId: req.user.id })
+      .populate('penerimaId', 'email')
+      .populate('klasifikasiId', 'nama warna')
+      .sort({ createdAt: -1 });
+    res.json(letters);
   } catch (err) {
     res.status(500).json({ message: 'Gagal mengambil surat keluar.' });
   }
 });
 
-// 📥 5. Surat KELUAR (untuk pengirim) - PENCARIAN — filter unik
+// 📥 5. Surat KELUAR (pencarian)
 router.get('/keluar/search', auth, async (req, res) => {
   try {
     const { q, startDate, endDate, classificationId } = req.query;
@@ -111,22 +165,20 @@ router.get('/keluar/search', auth, async (req, res) => {
       .populate('klasifikasiId', 'nama warna')
       .sort({ createdAt: -1 });
 
-    // ✅ Filter unik berdasarkan suratId (ambil yang terbaru)
+    // Filter unik berdasarkan suratId
     const uniqueMap = {};
     allLetters.forEach(letter => {
       if (!uniqueMap[letter.suratId] || letter.createdAt > uniqueMap[letter.suratId].createdAt) {
         uniqueMap[letter.suratId] = letter;
       }
     });
-    const uniqueLetters = Object.values(uniqueMap);
-
-    res.json(uniqueLetters);
+    res.json(Object.values(uniqueMap));
   } catch (err) {
     res.status(500).json({ message: 'Gagal mencari surat keluar.' });
   }
 });
 
-// 📥 6. Surat MASUK (untuk penerima) - PENCARIAN — filter unik
+// 📥 6. Surat MASUK (pencarian)
 router.get('/masuk/search', auth, async (req, res) => {
   try {
     const { q, startDate, endDate, classificationId } = req.query;
@@ -155,151 +207,141 @@ router.get('/masuk/search', auth, async (req, res) => {
       .populate('klasifikasiId', 'nama warna')
       .sort({ createdAt: -1 });
 
-    // ✅ Filter unik berdasarkan suratId (ambil yang terbaru)
     const uniqueMap = {};
     allLetters.forEach(letter => {
       if (!uniqueMap[letter.suratId] || letter.createdAt > uniqueMap[letter.suratId].createdAt) {
         uniqueMap[letter.suratId] = letter;
       }
     });
-    const uniqueLetters = Object.values(uniqueMap);
-
-    res.json(uniqueLetters);
+    res.json(Object.values(uniqueMap));
   } catch (err) {
     res.status(500).json({ message: 'Gagal mencari surat masuk.' });
   }
 });
 
-// 🔍 7. Detail surat (selalu ambil dari outgoing agar biodata muncul)
+// 🔍 7. Detail surat
 router.get('/:id', auth, async (req, res) => {
   try {
-    // Ambil surat berdasarkan ID
-    const letter = await Letter.findById(req.params.id);
-    if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
-
-    // Cari salinan 'outgoing' dengan suratId yang sama agar biodata muncul
-    const outgoingLetter = await Letter.findOne({
-      suratId: letter.suratId,
-      type: 'outgoing'
-    }).populate('pengirimId', 'email')
-      .populate('penerimaId', 'email')   // ✅ Tambahkan ini
+    const letter = await Letter.findById(req.params.id)
+      .populate('pengirimId', 'email')
+      .populate('penerimaId', 'email')
       .populate('klasifikasiId', 'nama warna');
 
-    if (!outgoingLetter) {
-      return res.status(404).json({ message: 'Salinan pengirim tidak ditemukan.' });
-    }
+    if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
 
     // Pastikan user adalah pengirim atau penerima
-    const isSender = outgoingLetter.ownerId.toString() === req.user.id.toString();
-    const isReceiver = letter.ownerId.toString() === req.user.id.toString();
+    const isSender = letter.pengirimId?._id?.toString() === req.user.id.toString();
+    const isReceiver = letter.penerimaId?._id?.toString() === req.user.id.toString();
 
     if (!isSender && !isReceiver) {
       return res.status(403).json({ message: 'Akses ditolak.' });
     }
 
-    // Log akses detail surat (opsional)
-    const { logActivity } = require('../utils/logActivity');
-    await logActivity(req.user.id, 'view_letter_detail', `User melihat detail surat "${letter.noSurat}"`, req);
-
-    res.json(outgoingLetter); // Kirim salinan outgoing agar biodata muncul
+    res.json(letter); // ✅ Kirim data lengkap, termasuk arsipDigital (URL publik)
   } catch (err) {
     console.error('Error di /letters/:id:', err);
     res.status(500).json({ message: 'Gagal mengambil detail surat.' });
   }
 });
 
-// ✏️ 8. Edit surat (hanya pengirim atau admin)
+// ✏️ 8. Edit surat
 router.put('/:id', auth, upload.single('arsipDigital'), async (req, res) => {
   try {
-    const { updateLetter } = require('../controllers/letterController');
-    return updateLetter(req, res);
+    const letter = await Letter.findById(req.params.id);
+    if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
+
+    const isOwner = letter.pengirimId?.toString() === req.user.id.toString();
+    if (!isOwner && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Hanya pengirim atau admin yang bisa edit.' });
+    }
+
+    // Update fields
+    letter.noUrut = req.body.noUrut ?? letter.noUrut;
+    letter.noSurat = req.body.noSurat ?? letter.noSurat;
+    letter.tanggalTerima = req.body.tanggalTerima ?? letter.tanggalTerima;
+    letter.tanggalDisposisi = req.body.tanggalDisposisi ?? letter.tanggalDisposisi;
+    letter.asalSurat = req.body.asalSurat ?? letter.asalSurat;
+    letter.perihal = req.body.perihal ?? letter.perihal;
+    letter.keterangan = req.body.keterangan ?? letter.keterangan;
+    letter.tanggalDisposisiBidang = req.body.tanggalDisposisiBidang ?? letter.tanggalDisposisiBidang;
+    letter.jabatan = req.body.jabatan ?? letter.jabatan;
+    letter.nama = req.body.nama ?? letter.nama;
+    letter.nip = req.body.nip ?? letter.nip;
+    letter.penerimaEmail = req.body.penerimaEmail ?? letter.penerimaEmail;
+    letter.klasifikasiId = req.body.klasifikasiId ?? letter.klasifikasiId;
+
+    // Jika ada file baru, upload ke Cloudinary
+    if (req.file) {
+      try {
+        const result = await cloudinary.uploader.upload(req.file.path, {
+          folder: 'bpkad_surat',
+          resource_type: 'auto',
+          invalidate: true
+        });
+        letter.arsipDigital = result.secure_url;
+      } catch (uploadErr) {
+        console.error('Cloudinary upload error:', uploadErr);
+        return res.status(500).json({ message: 'Gagal mengunggah file baru.' });
+      }
+    }
+
+    await letter.save();
+    res.json(letter);
   } catch (err) {
-    console.error('Error update surat via route:', err);
+    console.error('Error update surat:', err);
     res.status(500).json({ message: 'Gagal memperbarui surat.' });
   }
 });
 
-// 🗑️ 9. Hapus surat (hanya pengirim atau admin)
+// 🗑️ 9. Hapus surat
 router.delete('/:id', auth, async (req, res) => {
   try {
-    const { deleteLetter } = require('../controllers/letterController');
-    return deleteLetter(req, res);
+    const letter = await Letter.findById(req.params.id);
+    if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
+
+    const isOwner = letter.pengirimId?.toString() === req.user.id.toString();
+    if (!isOwner && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Hanya pengirim atau admin yang bisa hapus.' });
+    }
+
+    await letter.remove();
+    res.json({ message: 'Surat berhasil dihapus.' });
   } catch (err) {
-    console.error('Error hapus surat via route:', err);
+    console.error('Error hapus surat:', err);
     res.status(500).json({ message: 'Gagal menghapus surat.' });
   }
 });
 
-// 🔥 ADMIN: Edit surat milik siapa pun
-router.put('/admin/:id', auth, admin, upload.single('arsipDigital'), async (req, res) => {
-  try {
-    const { adminUpdateLetter } = require('../controllers/letterController');
-    return adminUpdateLetter(req, res);
-  } catch (err) {
-    console.error('Error admin update surat via route:', err);
-    res.status(500).json({ message: 'Gagal memperbarui surat.' });
-  }
-});
-
-// 🔥 ADMIN: Hapus surat milik siapa pun
-router.delete('/admin/:id', auth, admin, async (req, res) => {
-  try {
-    const { adminDeleteLetter } = require('../controllers/letterController');
-    return adminDeleteLetter(req, res);
-  } catch (err) {
-    console.error('Error admin hapus surat via route:', err);
-    res.status(500).json({ message: 'Gagal menghapus surat.' });
-  }
-});
-
-// 🔥 HAPUS PERMANEN: Semua role bisa hapus semua surat secara permanen - TANPA BATAS
-router.delete('/permanent/:id', auth, async (req, res) => {
-  try {
-    const { deleteLetterPermanent } = require('../controllers/letterController');
-    return deleteLetterPermanent(req, res);
-  } catch (err) {
-    console.error('Error hapus permanen via route:', err);
-    res.status(500).json({ message: 'Gagal menghapus surat secara permanen.' });
-  }
-});
-
-// ⬇️ 10. Unduh surat + metadata (ZIP) - FIX KLASIFIKASI DI DOWNLOAD
+// ⬇️ 10. Unduh surat + metadata (ZIP) — *Opsional*: Anda bisa skip ini karena file sudah publik
+// Jika tetap ingin ZIP, gunakan URL publik dari arsipDigital untuk download file asli via fetch ke Cloudinary
 router.get('/:id/download', auth, async (req, res) => {
   try {
-    let letter;
-
-    // Cek akses
-    if (req.user.role === 'admin') {
-      letter = await Letter.findById(req.params.id)
-        .populate('pengirimId', 'email')
-        .populate('penerimaId', 'email')
-        .populate('klasifikasiId', 'nama warna'); // ✅ FIX: Tambahkan populate
-    } else {
-      letter = await Letter.findOne({
-        _id: req.params.id,
-        $or: [
-          { pengirimId: req.user.id },
-          { penerimaId: req.user.id }
-        ]
-      })
-        .populate('pengirimId', 'email')
-        .populate('penerimaId', 'email')
-        .populate('klasifikasiId', 'nama warna'); // ✅ FIX: Tambahkan populate
-    }
+    const letter = await Letter.findById(req.params.id)
+      .populate('pengirimId', 'email')
+      .populate('penerimaId', 'email')
+      .populate('klasifikasiId', 'nama warna');
 
     if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
 
-    // ✅ GUNAKAN PATH ABSOLUT DARI ROOT PROYEK
-    const filePath = path.join(process.cwd(), 'uploads', path.basename(letter.arsipDigital));
-
-    if (!fs.existsSync(filePath)) {
-      console.error('File tidak ditemukan:', filePath);
-      console.error('CWD saat ini:', process.cwd()); // Log CWD untuk debugging
-      console.error('Path yang dicari:', filePath); // Log path untuk debugging
-      return res.status(404).json({ message: 'File arsip tidak ditemukan.' });
+    const isSender = letter.pengirimId?._id?.toString() === req.user.id.toString();
+    const isReceiver = letter.penerimaId?._id?.toString() === req.user.id.toString();
+    if (!isSender && !isReceiver) {
+      return res.status(403).json({ message: 'Akses ditolak.' });
     }
 
-    const originalFileName = path.basename(letter.arsipDigital);
+    // Jika arsipDigital adalah URL Cloudinary, kita bisa unduh langsung dari sana
+    if (!letter.arsipDigital) {
+      return res.status(404).json({ message: 'File arsip tidak tersedia.' });
+    }
+
+    // ⚠️ Catatan: Untuk produksi, lebih baik gunakan signed URL atau proxy ke Cloudinary
+    // Untuk demo, kita asumsikan public URL bisa diakses langsung
+    const response = await fetch(letter.arsipDigital);
+    if (!response.ok) {
+      return res.status(404).json({ message: 'File asli tidak dapat diunduh.' });
+    }
+
+    const blob = await response.blob();
     const zipName = `surat_${letter.noSurat.replace(/\//g, '_')}.zip`;
 
     res.setHeader('Content-Type', 'application/zip');
@@ -308,10 +350,10 @@ router.get('/:id/download', auth, async (req, res) => {
     const archive = archiver('zip', { zlib: { level: 9 } });
     archive.pipe(res);
 
-    // Tambahkan file asli
-    archive.file(filePath, { name: originalFileName });
+    // Tambahkan file asli (dari Cloudinary)
+    archive.append(blob, { name: `${letter.noSurat.replace(/\//g, '_')}${path.extname(letter.arsipDigital)}` });
 
-    // Tambahkan data surat - FIX KLASIFIKASI DI SINI
+    // Tambahkan data surat
     const dataText = `
 DATA SURAT
 ==========
@@ -322,7 +364,7 @@ Tanggal Disposisi  : ${letter.tanggalDisposisi ? new Date(letter.tanggalDisposis
 Asal Surat         : ${letter.asalSurat}
 Perihal            : ${letter.perihal}
 Keterangan         : ${letter.keterangan}
-Tgl Disposisi Bidang: ${letter.tanggalDisposisiBidang ? new Date(letterisiBidang).toLocaleDateString('id-ID') : '-'}
+Tgl Disposisi Bidang: ${letter.tanggalDisposisiBidang ? new Date(letter.tanggalDisposisiBidang).toLocaleDateString('id-ID') : '-'}
 Jabatan            : ${letter.jabatan}
 Nama               : ${letter.nama}
 NIP                : ${letter.nip}
@@ -338,4 +380,5 @@ Klasifikasi        : ${letter.klasifikasiId?.nama || '–'}
     res.status(500).json({ message: 'Gagal mengunduh surat.' });
   }
 });
+
 module.exports = router;
