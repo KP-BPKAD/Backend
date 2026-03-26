@@ -289,12 +289,13 @@ router.get('/:id/download', auth, async (req, res) => {
 
     if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
 
-
-    const uploadsDir = path.join(__dirname, '..', 'uploads');
-    const filePath = path.join(uploadsDir, path.basename(letter.arsipDigital));
+    // ✅ GUNAKAN PATH ABSOLUT DARI ROOT PROYEK
+    const filePath = path.join(process.cwd(), 'uploads', path.basename(letter.arsipDigital));
 
     if (!fs.existsSync(filePath)) {
       console.error('File tidak ditemukan:', filePath);
+      console.error('CWD saat ini:', process.cwd()); // Log CWD untuk debugging
+      console.error('Path yang dicari:', filePath); // Log path untuk debugging
       return res.status(404).json({ message: 'File arsip tidak ditemukan.' });
     }
 
@@ -337,5 +338,4 @@ Klasifikasi        : ${letter.klasifikasiId?.nama || '–'}
     res.status(500).json({ message: 'Gagal mengunduh surat.' });
   }
 });
-
 module.exports = router;

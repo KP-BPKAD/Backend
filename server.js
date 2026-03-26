@@ -30,7 +30,7 @@ if (!fs.existsSync(uploadsDir)) {
     console.log('Folder uploads dibuat');
 }
 // Gunakan middleware untuk menyajikan file statis dari folder uploads
-app.use('/uploads', express.static(uploadsDir)); // Gunakan variabel uploadsDir
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // === 3. RATE LIMITER ===
 const loginLimiter = rateLimit({
