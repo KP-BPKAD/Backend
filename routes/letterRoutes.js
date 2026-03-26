@@ -11,7 +11,12 @@ const fs = require('fs');
 
 const router = express.Router();
 
-// 🔧 INTEGRASI: Serve file statis dari folder uploads
+// 🔧 INTEGRASI: Pastikan folder 'uploads' ada di root proyek saat server start
+const uploadsDir = path.join(__dirname, '..', 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log('✅ Folder uploads dibuat di:', uploadsDir);
+}
 
 // Setup multer
 const storage = multer.diskStorage({
@@ -201,7 +206,7 @@ router.get('/:id', auth, async (req, res) => {
     const { logActivity } = require('../utils/logActivity');
     await logActivity(req.user.id, 'view_letter_detail', `User melihat detail surat "${letter.noSurat}"`, req);
 
-    res.json(outgoingLetter); // Kirim salinan outgoing agar biodata muncul
+ res.json(outgoingLetter); // Kirim salinan outgoing agar biodata muncul
   } catch (err) {
     console.error('Error di /letters/:id:', err);
     res.status(500).json({ message: 'Gagal mengambil detail surat.' });
@@ -289,13 +294,13 @@ router.get('/:id/download', auth, async (req, res) => {
 
     if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
 
-    // ✅ GUNAKAN PATH ABSOLUT DARI ROOT PROYEK
+    // ✅ Gunakan path absolut dari root proyek (dengan garantinya folder uploads ada)
     const filePath = path.join(process.cwd(), 'uploads', path.basename(letter.arsipDigital));
 
     if (!fs.existsSync(filePath)) {
       console.error('File tidak ditemukan:', filePath);
-      console.error('CWD saat ini:', process.cwd()); // Log CWD untuk debugging
-      console.error('Path yang dicari:', filePath); // Log path untuk debugging
+      console.error('CWD saat ini:', process.cwd());
+      console.error('Path yang dicari:', filePath);
       return res.status(404).json({ message: 'File arsip tidak ditemukan.' });
     }
 
@@ -338,4 +343,5 @@ Klasifikasi        : ${letter.klasifikasiId?.nama || '–'}
     res.status(500).json({ message: 'Gagal mengunduh surat.' });
   }
 });
+
 module.exports = router;
