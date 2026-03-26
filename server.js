@@ -11,6 +11,7 @@ const activityLogger = require('./middleware/activityLogger');
 const auth = require('./middleware/auth');
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 5000;
 
 // === 1. KONEKSI DATABASE ===
