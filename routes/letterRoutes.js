@@ -12,8 +12,6 @@ const fs = require('fs');
 const router = express.Router();
 
 // 🔧 INTEGRASI: Serve file statis dari folder uploads
-// Letakkan ini SEBELUM definisi rute-rute lain
-router.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 // Setup multer
 const storage = multer.diskStorage({

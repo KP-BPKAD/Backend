@@ -6,6 +6,7 @@ const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs'); // Tambahkan fs
 const activityLogger = require('./middleware/activityLogger');
 const auth = require('./middleware/auth');
 
@@ -19,7 +20,16 @@ connectDB();
 app.use(cors());// ← CORS pertama
 app.use(helmet()); // keamanan header
 app.use(express.json({ limit: '10mb' })); // parse JSON
-app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // file statis
+
+// --- Tambahkan middleware untuk file statis uploads ---
+// Pastikan folder uploads ada sebelum middleware dijalankan
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    console.log('Folder uploads dibuat');
+}
+// Gunakan middleware untuk menyajikan file statis dari folder uploads
+app.use('/uploads', express.static(uploadsDir)); // Gunakan variabel uploadsDir
 
 // === 3. RATE LIMITER ===
 const loginLimiter = rateLimit({
