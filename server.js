@@ -46,9 +46,9 @@ app.use('/api/classifications', require('./routes/classificationRoutes'));
 // 🔑 Tambahkan ini untuk history
 app.use('/api/history', require('./routes/historyRoutes'));
 
-// === 5. ROOT ROUTE ===
+// === 5. ROOT ROUTE (Duplikat /health untuk kemungkinan health check awal Railway) ===
 app.get('/', (req, res) => {
-  res.send('Backend surat MERN aktif!');
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() }); // ✅ Sama seperti /health
 });
 
 // Health check untuk Railway TAMBAHAN
