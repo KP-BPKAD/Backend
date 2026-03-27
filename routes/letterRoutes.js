@@ -7,13 +7,15 @@ const User = require('../models/User');
 const auth = require('../middleware/auth');
 const admin = require('../middleware/admin');
 const archiver = require('archiver');
-// const fs = require('fs').promises; // Tidak digunakan untuk akses file lokal di route ini
+const axios = require('axios'); // Import axios untuk mengambil file dari Cloudinary
 
 const router = express.Router();
 
 // Gunakan memory storage — TIDAK ADA DISK STORAGE
 const storage = multer.memoryStorage();
 const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
+
+// ... (kode lainnya untuk route 1-9 tetap sama seperti sebelumnya) ...
 
 // 🔑 1. Route ADMIN: lihat semua surat — filter unik berdasarkan suratId
 router.get('/all', auth, admin, async (req, res) => {
@@ -212,7 +214,7 @@ router.delete('/:id', auth, async (req, res) => {
     const { deleteLetter } = require('../controllers/letterController');
     return deleteLetter(req, res);
   } catch (err) {
-    console.error('Error hapus surat via route:', err);
+    console.error('Error via route:', err);
     res.status(500).json({ message: 'Gagal menghapus surat.' });
   }
 });
@@ -250,8 +252,7 @@ router.delete('/permanent/:id', auth, async (req, res) => {
   }
 });
 
-// ⬇️ 10. Unduh surat + metadata (ZIP) - FIX KLASIFIKASI DI DOWNLOAD
-// Karena file ada di Cloudinary, endpoint ini hanya menghasilkan ZIP dari metadata.
+// ⬇️ 10. Unduh surat + metadata (ZIP) - FIX KLASIFIKASI & SUPPORT CLOUDINARY
 router.get('/:id/download', auth, async (req, res) => {
   try {
     let letter;
@@ -277,19 +278,69 @@ router.get('/:id/download', auth, async (req, res) => {
 
     if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
 
-    // Karena file ada di Cloudinary, kita tidak bisa mengaksesnya langsung untuk dimasukkan ke ZIP.
-    // Maka, endpoint ini hanya menghasilkan ZIP dari metadata.
-    // Jika ingin menyertakan file dari Cloudinary, perlu logika fetch dari URL Cloudinary ke buffer,
-    // lalu masukkan buffer ke archiver, yang lebih kompleks.
-    // Sebagai gantinya, kita bisa menyertakan URL file Cloudinary di metadata.
-
-    const zipName = `surat_${letter.noSurat.replace(/\//g, '_')}_metadata.zip`;
+    const zipName = `surat_${letter.noSurat.replace(/\//g, '_')}.zip`;
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
 
     const archive = archiver('zip', { zlib: { level: 9 } });
     archive.pipe(res);
+
+    // --- LOGIKA DOWNLOAD DIPERBARUI ---
+    const arsipDigital = letter.arsipDigital;
+
+    if (!arsipDigital) {
+      console.error('File arsip tidak ditemukan di database.');
+      // Tetap tambahkan data_surat.txt
+      const dataText = `
+DATA SURAT
+==========
+No Urut            : ${letter.noUrut}
+No Surat           : ${letter.noSurat}
+Tanggal Terima     : ${new Date(letter.tanggalTerima).toLocaleDateString('id-ID')}
+Tanggal Disposisi  : ${letter.tanggalDisposisi ? new Date(letter.tanggalDisposisi).toLocaleDateString('id-ID') : '-'}
+Asal Surat         : ${letter.asalSurat}
+Perihal            : ${letter.perihal}
+Keterangan         : ${letter.keterangan}
+Tgl Disposisi Bidang: ${letter.tanggalDisposisiBidang ? new Date(letter.tanggalDisposisiBidang).toLocaleDateString('id-ID') : '-'}
+Jabatan            : ${letter.jabatan}
+Nama               : ${letter.nama}
+NIP                : ${letter.nip}
+Pengirim           : ${letter.pengirimId?.email || '–'}
+Penerima           : ${letter.penerimaId?.email || '–'}
+Klasifikasi        : ${letter.klasifikasiId?.nama || '–'}
+Link File (Cloudinary): ${letter.arsipDigital || 'Tidak ada file'}
+`;
+      archive.append(dataText, { name: 'data_surat.txt' });
+    } else if (arsipDigital.startsWith('http://') || arsipDigital.startsWith('https://')) { // ✅ Perbaikan di sini
+      // JIKA arsipDigital adalah URL (misalnya Cloudinary)
+      console.log('Mengunduh file dari URL:', arsipDigital);
+      try {
+        const fileResponse = await axios.get(arsipDigital, { responseType: 'stream' });
+        // Ambil nama file dari URL Cloudinary
+        const originalFileName = path.basename(new URL(arsipDigital).pathname);
+        archive.append(fileResponse.data, { name: originalFileName });
+      } catch (fetchError) {
+        console.error('Gagal mengambil file dari URL:', fetchError.message);
+        // Jika gagal mengambil dari URL, tambahkan info error ke ZIP
+        archive.append(Buffer.from('Gagal mengambil file asli dari URL Cloudinary.\n' + fetchError.message), { name: 'ERROR_FILE_FETCH.txt' });
+      }
+    } else {
+      // JIKA arsipDigital adalah path lokal (misalnya '/uploads/namafile.pdf' - kasus lama)
+      // Hanya sebagai fallback jika ada data lama yang masih menyimpan path lokal
+      console.log('Mengunduh file dari path lokal (fallback):', arsipDigital);
+      const fs = require('fs'); // Import fs hanya jika path lokal digunakan
+      const path = require('path');
+      const filePath = path.join(process.cwd(), 'uploads', path.basename(arsipDigital));
+
+      if (!fs.existsSync(filePath)) {
+        console.error('File lokal tidak ditemukan:', filePath);
+        // Jika file lokal tidak ditemukan, lanjutkan tanpa file, hanya dengan data_surat.txt
+        archive.append(Buffer.from('File lokal tidak ditemukan di server.'), { name: 'FILE_NOT_FOUND.txt' });
+      } else {
+        archive.file(filePath, { name: path.basename(arsipDigital) });
+      }
+    }
 
     // Tambahkan data surat - FIX KLASIFIKASI DI SINI
     const dataText = `
@@ -309,14 +360,16 @@ NIP                : ${letter.nip}
 Pengirim           : ${letter.pengirimId?.email || '–'}
 Penerima           : ${letter.penerimaId?.email || '–'}
 Klasifikasi        : ${letter.klasifikasiId?.nama || '–'}
-Link File Cloudinary: ${letter.arsipDigital || 'Tidak ada file'}
+Link File (Cloudinary): ${letter.arsipDigital || 'Tidak ada file'}
 `;
     archive.append(dataText, { name: 'data_surat.txt' });
 
     await archive.finalize();
   } catch (err) {
     console.error('Error download:', err);
-    res.status(500).json({ message: 'Gagal mengunduh surat.' });
+    // Jika terjadi error sebelum archive.finalize(), mungkin sudah ada header terkirim
+    // Jadi lebih aman untuk tidak mengirim response baru
+    // res.status(500).json({ message: 'Gagal mengunduh surat.' });
   }
 });
 
