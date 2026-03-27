@@ -4,7 +4,18 @@ const User = require('../models/User');
 const History = require('../models/History');
 const mongoose = require('mongoose');
 const path = require('path');
-const fs = require('fs').promises;
+// fs.promises tidak lagi digunakan untuk menghapus file lokal
+// const fs = require('fs').promises; // Commented out or removed
+
+// 🔧 INTEGRASI: Import dan gunakan Cloudinary
+const cloudinary = require('cloudinary').v2;
+// Konfigurasi Cloudinary (pastikan environment variables disetel)
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
 const { logActivity } = require('../utils/logActivity');
 
 const isValidFileType = (fileName) => {
@@ -22,8 +33,8 @@ const isValidDate = (dateString) => {
 const createLetter = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'File arsip digital wajib diunggah.' });
-    if (!isValidFileType(req.file.originalname)) {
-      return res.status(400).json({ message: 'Hanya file .pdf, .docx, atau .xlsx yang diperbolehkan.' });
+    if (!isValidFileType(req.file.originalname)) { // Gunakan originalname dari buffer
+      return res.status(400).json({ message: 'Hanya file .pdf, .docx, .xlsx, .jpg, .jpeg, .png, .txt yang diperbolehkan.' });
     }
 
     const {
@@ -71,6 +82,32 @@ const createLetter = async (req, res) => {
 
     const suratId = `SURAT-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 
+    let arsipDigitalUrl = '';
+
+    // Upload file ke Cloudinary
+    if (req.file) {
+      try {
+        const result = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload_stream(
+            { resource_type: 'auto', folder: 'bpkad_surat' },
+            (error, result) => {
+              if (error) {
+                console.error('Cloudinary Upload Error:', error);
+                reject(error);
+              } else {
+                resolve(result);
+              }
+            }
+          ).end(req.file.buffer); // Gunakan buffer dari multer
+        });
+        arsipDigitalUrl = result.secure_url; // Simpan URL publik
+      } catch (uploadError) {
+        console.error('Error uploading to Cloudinary:', uploadError);
+        return res.status(500).json({ message: 'Gagal mengunggah file ke Cloudinary.' });
+      }
+    }
+
+
     const outgoingLetter = new Letter({
       suratId,
       ownerId: req.user.id,
@@ -86,7 +123,7 @@ const createLetter = async (req, res) => {
       jabatan,
       nama,
       nip,
-      arsipDigital: `/uploads/${req.file.filename}`,
+      arsipDigital: arsipDigitalUrl, // Gunakan URL Cloudinary
       pengirimId: req.user.id,
       penerimaId: penerima._id,
       klasifikasiId: klasifikasiIdObj
@@ -107,7 +144,7 @@ const createLetter = async (req, res) => {
       jabatan: '',
       nama: '',
       nip: '',
-      arsipDigital: `/uploads/${req.file.filename}`,
+      arsipDigital: arsipDigitalUrl, // Gunakan URL Cloudinary
       pengirimId: req.user.id,
       penerimaId: penerima._id,
       klasifikasiId: klasifikasiIdObj
@@ -250,17 +287,42 @@ const updateLetter = async (req, res) => {
       return res.status(400).json({ message: 'Nama terlalu panjang (maks 100 karakter).' });
     }
 
+    let updatedArsipDigitalUrl = letter.arsipDigital; // Default ke URL lama
+
     // Handle upload file baru
     if (req.file) {
-      if (!isValidFileType(req.file.originalname)) {
+      if (!isValidFileType(req.file.originalname)) { // Gunakan originalname dari buffer
         return res.status(400).json({ message: 'Tipe file tidak diizinkan.' });
       }
-      if (letter.arsipDigital) {
-        const oldPath = path.join(__dirname, '..', letter.arsipDigital);
-        await fs.unlink(oldPath).catch(() => {});
+
+      // Hapus file lama dari filesystem lokal (TIDAK BERLAKU LAGI UNTUK CLOUDINARY)
+      // if (letter.arsipDigital) {
+      //   const oldPath = path.join(__dirname, '..', letter.arsipDigital);
+      //   await fs.unlink(oldPath).catch(() => {});
+      // }
+
+      // Upload file baru ke Cloudinary
+      try {
+        const result = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload_stream(
+            { resource_type: 'auto', folder: 'bpkad_surat' },
+            (error, result) => {
+              if (error) {
+                console.error('Cloudinary Upload Error (Update):', error);
+                reject(error);
+              } else {
+                resolve(result);
+              }
+            }
+          ).end(req.file.buffer);
+        });
+        updatedArsipDigitalUrl = result.secure_url; // Gunakan URL baru
+      } catch (uploadError) {
+        console.error('Error uploading new file to Cloudinary (Update):', uploadError);
+        return res.status(500).json({ message: 'Gagal mengunggah file baru ke Cloudinary.' });
       }
-      letter.arsipDigital = `/uploads/${req.file.filename}`;
     }
+
 
     // Konversi klasifikasiId
     if (klasifikasiId !== undefined) {
@@ -285,7 +347,8 @@ const updateLetter = async (req, res) => {
       tanggalDisposisiBidang: tanggalDisposisiBidang ? new Date(tanggalDisposisiBidang) : letter.tanggalDisposisiBidang,
       jabatan: jabatan !== undefined ? jabatan : letter.jabatan,
       nama: nama !== undefined ? nama : letter.nama,
-      nip: nip !== undefined ? nip : letter.nip
+      nip: nip !== undefined ? nip : letter.nip,
+      arsipDigital: updatedArsipDigitalUrl // Gunakan URL yang mungkin telah diperbarui
     });
 
     await letter.save();
@@ -308,10 +371,13 @@ const deleteLetter = async (req, res) => {
     });
     if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan atau tidak memiliki izin hapus.' });
 
-    if (letter.arsipDigital) {
-      const filePath = path.join(__dirname, '..', letter.arsipDigital);
-      await fs.unlink(filePath).catch(() => {});
-    }
+    // Hapus file dari filesystem lokal (TIDAK BERLAKU LAGI UNTUK CLOUDINARY)
+    // if (letter.arsipDigital) {
+    //   const filePath = path.join(__dirname, '..', letter.arsipDigital);
+    //   await fs.unlink(filePath).catch(() => {});
+    // }
+
+    // Catatan: Anda mungkin ingin menambahkan logika untuk menghapus file dari Cloudinary berdasarkan URL atau public_id di sini.
 
     await logActivity(req.user.id, 'delete_letter', `Surat "${letter.noSurat}" dihapus (salinan ${letter.type})`, req);
     res.json({ message: 'Surat berhasil dihapus.' });
@@ -354,16 +420,41 @@ const adminUpdateLetter = async (req, res) => {
       return res.status(400).json({ message: 'Nama terlalu panjang (maks 100 karakter).' });
     }
 
+    let updatedArsipDigitalUrl = letter.arsipDigital; // Default ke URL lama
+
     if (req.file) {
-      if (!isValidFileType(req.file.originalname)) {
+      if (!isValidFileType(req.file.originalname)) { // Gunakan originalname dari buffer
         return res.status(400).json({ message: 'Tipe file tidak diizinkan.' });
       }
-      if (letter.arsipDigital) {
-        const oldPath = path.join(__dirname, '..', letter.arsipDigital);
-        await fs.unlink(oldPath).catch(() => {});
+
+      // Hapus file lama dari filesystem lokal (TIDAK BERLAKU LAGI UNTUK CLOUDINARY)
+      // if (letter.arsipDigital) {
+      //   const oldPath = path.join(__dirname, '..', letter.arsipDigital);
+      //   await fs.unlink(oldPath).catch(() => {});
+      // }
+
+      // Upload file baru ke Cloudinary
+      try {
+        const result = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload_stream(
+            { resource_type: 'auto', folder: 'bpkad_surat' },
+            (error, result) => {
+              if (error) {
+                console.error('Cloudinary Upload Error (Admin Update):', error);
+                reject(error);
+              } else {
+                resolve(result);
+              }
+            }
+          ).end(req.file.buffer);
+        });
+        updatedArsipDigitalUrl = result.secure_url; // Gunakan URL baru
+      } catch (uploadError) {
+        console.error('Error uploading new file to Cloudinary (Admin Update):', uploadError);
+        return res.status(500).json({ message: 'Gagal mengunggah file baru ke Cloudinary.' });
       }
-      letter.arsipDigital = `/uploads/${req.file.filename}`;
     }
+
 
     if (klasifikasiId !== undefined) {
       if (klasifikasiId && mongoose.Types.ObjectId.isValid(klasifikasiId)) {
@@ -386,7 +477,8 @@ const adminUpdateLetter = async (req, res) => {
       tanggalDisposisiBidang: tanggalDisposisiBidang ? new Date(tanggalDisposisiBidang) : letter.tanggalDisposisiBidang,
       jabatan: jabatan !== undefined ? jabatan : letter.jabatan,
       nama: nama !== undefined ? nama : letter.nama,
-      nip: nip !== undefined ? nip : letter.nip
+      nip: nip !== undefined ? nip : letter.nip,
+      arsipDigital: updatedArsipDigitalUrl // Gunakan URL yang mungkin telah diperbarui
     });
 
     await letter.save();
@@ -407,10 +499,13 @@ const adminDeleteLetter = async (req, res) => {
 
     const deletedCount = await Letter.deleteMany({ suratId: letter.suratId });
 
-    if (letter.arsipDigital) {
-      const filePath = path.join(__dirname, '..', letter.arsipDigital);
-      await fs.unlink(filePath).catch(() => {});
-    }
+    // Hapus file dari filesystem lokal (TIDAK BERLAKU LAGI UNTUK CLOUDINARY)
+    // if (letter.arsipDigital) {
+    //   const filePath = path.join(__dirname, '..', letter.arsipDigital);
+    //   await fs.unlink(filePath).catch(() => {});
+    // }
+
+    // Catatan: Anda mungkin ingin menambahkan logika untuk menghapus file dari Cloudinary berdasarkan URL atau public_id di sini.
 
     await logActivity(req.user.id, 'admin_delete_letter', `Admin menghapus surat "${letter.noSurat}"`, req);
     res.json({ message: `Surat berhasil dihapus oleh admin (${deletedCount.deletedCount} salinan dihapus).` });
@@ -427,10 +522,13 @@ const deleteLetterPermanent = async (req, res) => {
 
     const deletedCount = await Letter.deleteMany({ suratId: letter.suratId });
 
-    if (letter.arsipDigital) {
-      const filePath = path.join(__dirname, '..', letter.arsipDigital);
-      await fs.unlink(filePath).catch(() => {});
-    }
+    // Hapus file dari filesystem lokal (TIDAK BERLAKU LAGI UNTUK CLOUDINARY)
+    // if (letter.arsipDigital) {
+    //   const filePath = path.join(__dirname, '..', letter.arsipDigital);
+    //   await fs.unlink(filePath).catch(() => {});
+    // }
+
+    // Catatan: Anda mungkin ingin menambahkan logika untuk menghapus file dari Cloudinary berdasarkan URL atau public_id di sini.
 
     await logActivity(req.user.id, 'delete_letter_permanent', `User menghapus surat "${letter.noSurat}" secara permanen`, req);
     res.json({ 
