@@ -1,10 +1,16 @@
-// controllers/letterController.js
+// controllers/letterController.js (hanya fungsi createLetter yang diganti)
 const Letter = require('../models/Letter');
 const User = require('../models/User');
+const History = require('../models/History');
 const mongoose = require('mongoose');
+const path = require('path');
 const { logActivity } = require('../utils/logActivity');
 
-// 🔧 HANYA UNTUK UPLOAD KE CLOUDINARY — TANPA FS, TANPA UPLOADS/
+
+// Import 'stream' dari Node.js core
+const stream = require('stream');
+
+// Import cloudinary
 const cloudinary = require('cloudinary').v2;
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -35,7 +41,7 @@ const createLetter = async (req, res) => {
     } = req.body;
 
     if (!noUrut || !noSurat || !tanggalTerima || !asalSurat || !perihal || !nama || !nip || !penerimaEmail) {
-      return res.status(400).json({ message: 'Field wajib tidakkap.' });
+      return res.status(400).json({ message: 'Field wajib tidak kap.' });
     }
 
     const parsedNoUrut = parseInt(noUrut);
@@ -63,25 +69,32 @@ const createLetter = async (req, res) => {
 
     let arsipDigitalUrl = '';
 
-    // ✅ Upload ke Cloudinary — hanya ini yang dijalankan
+    // ✅ Upload ke Cloudinary menggunakan axios (bypass library cloudinary)
     try {
-      const result = await new Promise((resolve, reject) => {
-        cloudinary.uploader.upload(
-          req.file.buffer,
-          {
-            resource_type: 'auto',
-            folder: 'bpkad_surat',
-            public_id: `surat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      const FormData = require('form-data'); // Import form-data
+      const formData = new FormData();
+      formData.append('file', req.file.buffer, { filename: req.file.originalname });
+      formData.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET); // Harus dibuat di dashboard Cloudinary
+      formData.append('folder', 'bpkad_surat');
+      formData.append('public_id', `surat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+
+      const response = await require('axios').post(
+        `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/auto/upload`,
+        formData,
+        {
+          headers: {
+            ...formData.getHeaders(), // Penting untuk multipart
           },
-          (error, result) => {
-            if (error) reject(error);
-            resolve(result);
-          }
-        );
-      });
-      arsipDigitalUrl = result.secure_url;
+          auth: {
+            username: process.env.CLOUDINARY_API_KEY,
+            password: process.env.CLOUDINARY_API_SECRET,
+          },
+        }
+      );
+
+      arsipDigitalUrl = response.data.secure_url; // Ambil URL dari response
     } catch (uploadErr) {
-      console.error('Cloudinary upload failed:', uploadErr);
+      console.error('Axios Cloudinary upload failed:', uploadErr.response?.data || uploadErr.message);
       return res.status(500).json({ message: 'Upload ke Cloudinary gagal.' });
     }
 
@@ -98,7 +111,7 @@ const createLetter = async (req, res) => {
       jabatan,
       nama,
       nip,
-      arsipDigital: arsipDigitalUrl,
+      arsipDigital: arsipDigitalUrl, // Gunakan URL Cloudinary
       pengirimId: req.user.id,
       penerimaId: penerima._id,
       klasifikasiId: klasifikasiIdObj
@@ -109,7 +122,7 @@ const createLetter = async (req, res) => {
       ownerId: penerima._id,
       type: 'incoming',
       noSurat,
-      noUrut:NoUrut,
+      noUrut: parsedNoUrut,
       perihal,
       asalSurat,
       keterangan,
@@ -117,7 +130,7 @@ const createLetter = async (req, res) => {
       jabatan: '',
       nama: '',
       nip: '',
-      arsipDigital: arsipDigitalUrl,
+      arsipDigital: arsipDigitalUrl, // Gunakan URL Cloudinary
       pengirimId: req.user.id,
       penerimaId: penerima._id,
       klasifikasiId: klasifikasiIdObj
@@ -133,7 +146,17 @@ const createLetter = async (req, res) => {
   }
 };
 
-module.exports = { createLetter };
+
+
+
+
+
+
+
+
+
+
+
 // READ: Surat Masuk — filter unik
 const getIncomingLetters = async (req, res) => {
   try {
