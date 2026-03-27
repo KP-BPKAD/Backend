@@ -4,12 +4,15 @@ const User = require('../models/User');
 const History = require('../models/History');
 const mongoose = require('mongoose');
 const path = require('path');
-const axios = require('axios'); // Import axios
+// const fs = require('fs').promises; // Tidak digunakan untuk file lokal
 
-// fs.promises tidak lagi digunakan untuk menghapus file lokal
-// const fs = require('fs').promises; // Commented out or removed
-
-// Tidak ada import/config cloudinary lagi
+// 🔧 INTEGRASI: Import dan konfigurasi Cloudinary (pastikan versi 1.40.0)
+const cloudinary = require('cloudinary').v2;
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
 
 const { logActivity } = require('../utils/logActivity');
 
@@ -79,40 +82,39 @@ const createLetter = async (req, res) => {
 
     let arsipDigitalUrl = '';
 
-    // Upload file ke Cloudinary via axios
+    // Upload file ke Cloudinary menggunakan cloudinary.uploader.upload (versi callback)
     if (req.file) {
-      const formData = new FormData();
-      // Catatan: node-fetch dan axios membutuhkan buffer untuk file dalam FormData
-      // Multer di routes/letterRoutes.js harus menggunakan memoryStorage
-      formData.append('file', req.file.buffer, { filename: req.file.originalname });
-      formData.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET); // Gunakan preset yang dibuat di dashboard Cloudinary
-      formData.append('folder', 'bpkad_surat');
-
-    // Upload file ke Cloudinary menggunakan method sync/callback (lebih stabil di Node.js)
-    try {
-      const result = await new Promise((resolve, reject) => {
-        cloudinary.uploader.upload(
-          req.file.buffer,
-          {
-            resource_type: 'auto',
-            folder: 'bpkad_surat',
-            public_id: `surat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-          },
-          (error, result) => {
-            if (error) {
-              console.error('Cloudinary Upload Error:', error);
-              reject(error);
-            } else {
-              resolve(result);
+      try {
+        const result = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload(
+            req.file.buffer, // Gunakan buffer dari multer memoryStorage
+            {
+              resource_type: 'auto',
+              folder: 'bpkad_surat',
+              public_id: `surat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}` // Opsional: ID unik
+            },
+            (error, result) => {
+              if (error) {
+                console.error('Cloudinary Upload Error (createLetter):', error);
+                reject(error);
+              } else {
+                resolve(result);
+              }
             }
-          }
-        );
-      });
-      arsipDigitalUrl = result.secure_url;
-    } catch (uploadError) {
-      console.error('Error uploading to Cloudinary:', uploadError);
-      return res.status(500).json({ message: 'Gagal mengunggah file ke Cloudinary.' });
-    }
+          );
+        });
+        arsipDigitalUrl = result.secure_url; // Simpan URL publik
+      } catch (uploadError) {
+        console.error('Error uploading to Cloudinary (createLetter):', uploadError);
+        // Tangani error Cloudinary
+        if (uploadError.http_code === 401) {
+          return res.status(500).json({ message: 'Gagal mengautentikasi dengan Cloudinary. Periksa kunci API.' });
+        }
+        if (uploadError.http_code === 400) {
+          return res.status(400).json({ message: 'File tidak valid untuk diunggah ke Cloudinary.' });
+        }
+        return res.status(500).json({ message: 'Gagal mengunggah file ke Cloudinary.' });
+      }
     }
 
 
@@ -131,7 +133,7 @@ const createLetter = async (req, res) => {
       jabatan,
       nama,
       nip,
-      arsipDigital: arsipDigitalUrl, // Gunakan URL dari axios
+      arsipDigital: arsipDigitalUrl, // Gunakan URL dari Cloudinary
       pengirimId: req.user.id,
       penerimaId: penerima._id,
       klasifikasiId: klasifikasiIdObj
@@ -152,7 +154,7 @@ const createLetter = async (req, res) => {
       jabatan: '',
       nama: '',
       nip: '',
-      arsipDigital: arsipDigitalUrl, // Gunakan URL dari axios
+      arsipDigital: arsipDigitalUrl, // Gunakan URL dari Cloudinary
       pengirimId: req.user.id,
       penerimaId: penerima._id,
       klasifikasiId: klasifikasiIdObj
@@ -166,7 +168,6 @@ const createLetter = async (req, res) => {
       message: 'Surat berhasil dikirim.', 
       letter: outgoingLetter
     });
-
   } catch (error) {
     console.error('Error createLetter:', error);
     res.status(500).json({ message: 'Gagal mengirim surat.' });
@@ -298,41 +299,41 @@ const updateLetter = async (req, res) => {
 
     let updatedArsipDigitalUrl = letter.arsipDigital; // Default ke URL lama
 
-    // Handle upload file baru via axios
+    // Handle upload file baru
     if (req.file) {
-      if (!isValidFileType(req.file.originalname)) { // Gunakan originalname dari buffer
+      if (!isValidFileType(req.file.originalname)) {
         return res.status(400).json({ message: 'Tipe file tidak diizinkan.' });
       }
 
-      // Hapus file lama dari filesystem lokal (TIDAK BERLAKU LAGI UNTUK CLOUDINARY)
-      // if (letter.arsipDigital) {
-      //   const oldPath = path.join(__dirname, '..', letter.arsipDigital);
-      //   await fs.unlink(oldPath).catch(() => {});
-      // }
-
-      // Upload file baru ke Cloudinary via axios
-      const formData = new FormData();
-      formData.append('file', req.file.buffer, { filename: req.file.originalname });
-      formData.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET); // Gunakan preset yang sama
-      formData.append('folder', 'bpkad_surat');
-
+      // Upload file baru ke Cloudinary
       try {
-        const response = await axios.post(
-          `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/auto/upload`,
-          formData,
-          {
-            headers: {
-              ...formData.getHeaders(),
+        const result = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload(
+            req.file.buffer,
+            {
+              resource_type: 'auto',
+              folder: 'bpkad_surat',
+              public_id: `surat_update_${Date.now()}_${Math.random().toString(36).substr(2, 9)}` // ID unik untuk update
             },
-            auth: {
-              username: process.env.CLOUDINARY_API_KEY,
-              password: process.env.CLOUDINARY_API_SECRET,
-            },
-          }
-        );
-        updatedArsipDigitalUrl = response.data.secure_url; // Gunakan URL baru dari axios
+            (error, result) => {
+              if (error) {
+                console.error('Cloudinary Upload Error (updateLetter):', error);
+                reject(error);
+              } else {
+                resolve(result);
+              }
+            }
+          );
+        });
+        updatedArsipDigitalUrl = result.secure_url; // Gunakan URL baru
       } catch (uploadError) {
-        console.error('Error uploading new file to Cloudinary via axios (Update):', uploadError.response?.data || uploadError.message);
+        console.error('Error uploading new file to Cloudinary (updateLetter):', uploadError);
+        if (uploadError.http_code === 401) {
+          return res.status(500).json({ message: 'Gagal mengautentikasi dengan Cloudinary. Periksa kunci API.' });
+        }
+        if (uploadError.http_code === 400) {
+          return res.status(400).json({ message: 'File tidak valid untuk diunggah ke Cloudinary.' });
+        }
         return res.status(500).json({ message: 'Gagal mengunggah file baru ke Cloudinary.' });
       }
     }
@@ -362,7 +363,7 @@ const updateLetter = async (req, res) => {
       jabatan: jabatan !== undefined ? jabatan : letter.jabatan,
       nama: nama !== undefined ? nama : letter.nama,
       nip: nip !== undefined ? nip : letter.nip,
-      arsipDigital: updatedArsipDigitalUrl // Gunakan URL dari axios
+      arsipDigital: updatedArsipDigitalUrl // Gunakan URL yang mungkin telah diperbarui
     });
 
     await letter.save();
@@ -437,39 +438,39 @@ const adminUpdateLetter = async (req, res) => {
     let updatedArsipDigitalUrl = letter.arsipDigital; // Default ke URL lama
 
     if (req.file) {
-      if (!isValidFileType(req.file.originalname)) { // Gunakan originalname dari buffer
+      if (!isValidFileType(req.file.originalname)) {
         return res.status(400).json({ message: 'Tipe file tidak diizinkan.' });
       }
 
-      // Hapus file lama dari filesystem lokal (TIDAK BERLAKU LAGI UNTUK CLOUDINARY)
-      // if (letter.arsipDigital) {
-      //   const oldPath = path.join(__dirname, '..', letter.arsipDigital);
-      //   await fs.unlink(oldPath).catch(() => {});
-      // }
-
-      // Upload file baru ke Cloudinary via axios
-      const formData = new FormData();
-      formData.append('file', req.file.buffer, { filename: req.file.originalname });
-      formData.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET); // Gunakan preset yang sama
-      formData.append('folder', 'bpkad_surat');
-
+      // Upload file baru ke Cloudinary
       try {
-        const response = await axios.post(
-          `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/auto/upload`,
-          formData,
-          {
-            headers: {
-              ...formData.getHeaders(),
+        const result = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload(
+            req.file.buffer,
+            {
+              resource_type: 'auto',
+              folder: 'bpkad_surat',
+              public_id: `surat_admin_update_${Date.now()}_${Math.random().toString(36).substr(2, 9)}` // ID unik untuk admin update
             },
-            auth: {
-              username: process.env.CLOUDINARY_API_KEY,
-              password: process.env.CLOUDINARY_API_SECRET,
-            },
-          }
-        );
-        updatedArsipDigitalUrl = response.data.secure_url; // Gunakan URL baru dari axios
+            (error, result) => {
+              if (error) {
+                console.error('Cloudinary Upload Error (adminUpdateLetter):', error);
+                reject(error);
+              } else {
+                resolve(result);
+              }
+            }
+          );
+        });
+        updatedArsipDigitalUrl = result.secure_url; // Gunakan URL baru
       } catch (uploadError) {
-        console.error('Error uploading new file to Cloudinary via axios (Admin Update):', uploadError.response?.data || uploadError.message);
+        console.error('Error uploading new file to Cloudinary (adminUpdateLetter):', uploadError);
+        if (uploadError.http_code === 401) {
+          return res.status(500).json({ message: 'Gagal mengautentikasi dengan Cloudinary. Periksa kunci API.' });
+        }
+        if (uploadError.http_code === 400) {
+          return res.status(400).json({ message: 'File tidak valid untuk diunggah ke Cloudinary.' });
+        }
         return res.status(500).json({ message: 'Gagal mengunggah file baru ke Cloudinary.' });
       }
     }
@@ -497,7 +498,7 @@ const adminUpdateLetter = async (req, res) => {
       jabatan: jabatan !== undefined ? jabatan : letter.jabatan,
       nama: nama !== undefined ? nama : letter.nama,
       nip: nip !== undefined ? nip : letter.nip,
-      arsipDigital: updatedArsipDigitalUrl // Gunakan URL dari axios
+      arsipDigital: updatedArsipDigitalUrl // Gunakan URL yang mungkin telah diperbarui
     });
 
     await letter.save();
