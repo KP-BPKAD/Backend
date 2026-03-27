@@ -28,7 +28,7 @@ const isValidDate = (dateString) => {
 const createLetter = async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'File arsip digital wajib diunggah.' });
-    if (!isValidFileType(req.file.originalname)) { // Gunakan originalname dari buffer
+    if (!isValidFileType(req.file.originalname)) {
       return res.status(400).json({ message: 'Hanya file .pdf, .docx, .xlsx, .jpg, .jpeg, .png, .txt yang diperbolehkan.' });
     }
 
@@ -88,25 +88,31 @@ const createLetter = async (req, res) => {
       formData.append('upload_preset', process.env.CLOUDINARY_UPLOAD_PRESET); // Gunakan preset yang dibuat di dashboard Cloudinary
       formData.append('folder', 'bpkad_surat');
 
-      try {
-        const response = await axios.post(
-          `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/auto/upload`,
-          formData,
+    // Upload file ke Cloudinary menggunakan method sync/callback (lebih stabil di Node.js)
+    try {
+      const result = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload(
+          req.file.buffer,
           {
-            headers: {
-              ...formData.getHeaders(), // Penting: untuk multipart/form-data
-            },
-            auth: {
-              username: process.env.CLOUDINARY_API_KEY,
-              password: process.env.CLOUDINARY_API_SECRET,
-            },
+            resource_type: 'auto',
+            folder: 'bpkad_surat',
+            public_id: `surat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+          },
+          (error, result) => {
+            if (error) {
+              console.error('Cloudinary Upload Error:', error);
+              reject(error);
+            } else {
+              resolve(result);
+            }
           }
         );
-        arsipDigitalUrl = response.data.secure_url; // Ambil URL dari respons Cloudinary
-      } catch (uploadError) {
-        console.error('Error uploading to Cloudinary via axios:', uploadError.response?.data || uploadError.message);
-        return res.status(500).json({ message: 'Gagal mengunggah file ke Cloudinary.' });
-      }
+      });
+      arsipDigitalUrl = result.secure_url;
+    } catch (uploadError) {
+      console.error('Error uploading to Cloudinary:', uploadError);
+      return res.status(500).json({ message: 'Gagal mengunggah file ke Cloudinary.' });
+    }
     }
 
 
@@ -160,6 +166,7 @@ const createLetter = async (req, res) => {
       message: 'Surat berhasil dikirim.', 
       letter: outgoingLetter
     });
+
   } catch (error) {
     console.error('Error createLetter:', error);
     res.status(500).json({ message: 'Gagal mengirim surat.' });
