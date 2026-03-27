@@ -1,14 +1,11 @@
 // controllers/letterController.js
 const Letter = require('../models/Letter');
 const User = require('../models/User');
-const History = require('../models/History');
 const mongoose = require('mongoose');
-const path = require('path');
 const { logActivity } = require('../utils/logActivity');
 
-// 🔧 INTEGRASI: Import dan gunakan Cloudinary v1.40.0
+// 🔧 HANYA UNTUK UPLOAD KE CLOUDINARY — TANPA FS, TANPA UPLOADS/
 const cloudinary = require('cloudinary').v2;
-// Konfigurasi Cloudinary (pastikan environment variables disetel)
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -16,8 +13,8 @@ cloudinary.config({
 });
 
 const isValidFileType = (fileName) => {
-  const ext = path.extname(fileName).toLowerCase();
-  return /\.(pdf|docx|xlsx|jpg|jpeg|png|txt)$/i.test(ext);
+  const ext = fileName.toLowerCase().match(/\.[^/.]+$/)?.[0];
+  return /\.(pdf|docx|xlsx|jpg|jpeg|png|txt)$/.test(ext);
 };
 
 const isValidDate = (dateString) => {
@@ -26,51 +23,36 @@ const isValidDate = (dateString) => {
   return date.toString() !== 'Invalid Date' && dateString.match(/^\d{4}-\d{2}-\d{2}$/);
 };
 
-// CREATE — buat 2 dokumen (outgoing + incoming)
 const createLetter = async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ message: 'File arsip digital wajib diunggah.' });
+    if (!req.file) return res.status(400).json({ message: 'File wajib diunggah.' });
     if (!isValidFileType(req.file.originalname)) {
-      return res.status(400).json({ message: 'Hanya file .pdf, .docx, .xlsx, .jpg, .jpeg, .png, .txt yang diperbolehkan.' });
+      return res.status(400).json({ message: 'Tipe file tidak didukung.' });
     }
 
     const {
-      noUrut, noSurat, tanggalTerima, tanggalDisposisi, asalSurat,
-      perihal, keterangan, tanggalDisposisiBidang, jabatan, nama, nip,
-      penerimaEmail, klasifikasiId
+      noUrut, noSurat, tanggalTerima, asalSurat, perihal, keterangan, jabatan, nama, nip, penerimaEmail, klasifikasiId
     } = req.body;
 
     if (!noUrut || !noSurat || !tanggalTerima || !asalSurat || !perihal || !nama || !nip || !penerimaEmail) {
-      return res.status(400).json({ message: 'Semua field wajib diisi, termasuk penerima email.' });
+      return res.status(400).json({ message: 'Field wajib tidakkap.' });
     }
 
     const parsedNoUrut = parseInt(noUrut);
     if (isNaN(parsedNoUrut) || parsedNoUrut <= 0) {
-      return res.status(400).json({ message: 'Nomor urut harus berupa angka positif.' });
+      return res.status(400).json({ message: 'No Urut harus angka positif.' });
     }
 
     if (!isValidDate(tanggalTerima)) {
-      return res.status(400).json({ message: 'Format tanggal terima tidak valid. Gunakan YYYY-MM-DD.' });
-    }
-    if (tanggalDisposisi && !isValidDate(tanggalDisposisi)) {
-      return res.status(400).json({ message: 'Format tanggal disposisi tidak valid. Gunakan YYYY-MM-DD.' });
-    }
-    if (tanggalDisposisiBidang && !isValidDate(tanggalDisposisiBidang)) {
-      return res.status(400).json({ message: 'Format tanggal disposisi bidang tidak valid. Gunakan YYYY-MM-DD.' });
+      return res.status(400).json({ message: 'Tanggal Terima format salah.' });
     }
 
-    if (!/^\d+$/.test(nip) || nip.length > 20 || nip.length < 9) {
-      return res.status(400).json({ message: 'NIP hanya boleh berisi angka (9–20 digit).' });
-    }
-
-    if (nama.length > 100) {
-      return res.status(400).json({ message: 'Nama terlalu panjang (maks 100 karakter).' });
+    if (!/^\d+$/.test(nip) || nip.length < 9 || nip.length > 20) {
+      return res.status(400).json({ message: 'NIP harus 9-20 digit angka.' });
     }
 
     const penerima = await User.findOne({ email: penerimaEmail });
-    if (!penerima) {
-      return res.status(400).json({ message: 'Penerima tidak terdaftar dalam sistem.' });
-    }
+    if (!penerima) return res.status(400).json({ message: 'Penerima tidak ditemukan.' });
 
     let klasifikasiIdObj = null;
     if (klasifikasiId && mongoose.Types.ObjectId.isValid(klasifikasiId)) {
@@ -81,36 +63,29 @@ const createLetter = async (req, res) => {
 
     let arsipDigitalUrl = '';
 
-    // Upload file ke Cloudinary menggunakan Buffer
-    if (req.file) {
-      try {
-        // Gunakan upload (bukan upload_stream) untuk versi 1.40.0
-        const result = await new Promise((resolve, reject) => {
-          cloudinary.uploader.upload(
-            req.file.buffer, // Gunakan buffer langsung
-            {
-              resource_type: 'auto',
-              folder: 'bpkad_surat',
-              public_id: `surat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-            },
-            (error, result) => {
-              if (error) {
-                console.error('Cloudinary Upload Error (Callback):', error);
-                reject(error);
-              } else {
-                resolve(result);
-              }
-            }
-          );
-        });
-        arsipDigitalUrl = result.secure_url; // Ambil URL publik
-      } catch (uploadError) {
-        console.error('Error uploading to Cloudinary:', uploadError);
-        return res.status(500).json({ message: 'Gagal mengunggah file ke Cloudinary.' });
-      }
+    // ✅ Upload ke Cloudinary — hanya ini yang dijalankan
+    try {
+      const result = await new Promise((resolve, reject) => {
+        cloudinary.uploader.upload(
+          req.file.buffer,
+          {
+            resource_type: 'auto',
+            folder: 'bpkad_surat',
+            public_id: `surat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+          },
+          (error, result) => {
+            if (error) reject(error);
+            resolve(result);
+          }
+        );
+      });
+      arsipDigitalUrl = result.secure_url;
+    } catch (uploadErr) {
+      console.error('Cloudinary upload failed:', uploadErr);
+      return res.status(500).json({ message: 'Upload ke Cloudinary gagal.' });
     }
 
-    const outgoingLetter = new Letter({
+    const outgoing = new Letter({
       suratId,
       ownerId: req.user.id,
       type: 'outgoing',
@@ -120,52 +95,45 @@ const createLetter = async (req, res) => {
       asalSurat,
       keterangan,
       tanggalTerima: new Date(tanggalTerima),
-      tanggalDisposisi: tanggalDisposisi ? new Date(tanggalDisposisi) : undefined,
-      tanggalDisposisiBidang: tanggalDisposisiBidang ? new Date(tanggalDisposisiBidang) : undefined,
       jabatan,
       nama,
       nip,
-      arsipDigital: arsipDigitalUrl, // Gunakan URL Cloudinary
+      arsipDigital: arsipDigitalUrl,
       pengirimId: req.user.id,
       penerimaId: penerima._id,
       klasifikasiId: klasifikasiIdObj
     });
 
-    const incomingLetter = new Letter({
+    const incoming = new Letter({
       suratId,
       ownerId: penerima._id,
       type: 'incoming',
       noSurat,
-      noUrut: parsedNoUrut,
+      noUrut:NoUrut,
       perihal,
       asalSurat,
       keterangan,
       tanggalTerima: new Date(tanggalTerima),
-      tanggalDisposisi: undefined,
-      tanggalDisposisiBidang: undefined,
       jabatan: '',
       nama: '',
       nip: '',
-      arsipDigital: arsipDigitalUrl, // Gunakan URL Cloudinary
+      arsipDigital: arsipDigitalUrl,
       pengirimId: req.user.id,
       penerimaId: penerima._id,
       klasifikasiId: klasifikasiIdObj
     });
 
-    await Promise.all([outgoingLetter.save(), incomingLetter.save()]);
+    await Promise.all([outgoing.save(), incoming.save()]);
+    await logActivity(req.user.id, 'send_letter', `Surat "${noSurat}" dikirim`, req);
 
-    await logActivity(req.user.id, 'send_letter', `Surat "${noSurat}" dikirim ke ${penerima.email}`, req);
-
-    res.status(201).json({ 
-      message: 'Surat berhasil dikirim.', 
-      letter: outgoingLetter
-    });
-  } catch (error) {
-    console.error('Error createLetter:', error);
+    res.status(201).json({ message: 'Surat berhasil dikirim.', letter: outgoing });
+  } catch (err) {
+    console.error('createLetter error:', err);
     res.status(500).json({ message: 'Gagal mengirim surat.' });
   }
 };
 
+module.exports = { createLetter };
 // READ: Surat Masuk — filter unik
 const getIncomingLetters = async (req, res) => {
   try {

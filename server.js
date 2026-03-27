@@ -10,53 +10,43 @@ const activityLogger = require('./middleware/activityLogger');
 const auth = require('./middleware/auth');
 
 const app = express();
-// 🔧 INTEGRASI: Tambahkan ini SEGERA SETELAH app di-create, SEBELUM middleware lain
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 5000;
 
-// === 1. KONEKSI DATABASE ===
 connectDB();
 
-// === 2. MIDDLEWARE UMUM (WAJIB DI ATAS ROUTE) ===
-app.use(cors());// ← CORS pertama
-app.use(helmet()); // keamanan header
-app.use(express.json({ limit: '10mb' })); // parse JSON
-app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // file statis
+app.use(cors());
+app.use(helmet());
+app.use(express.json({ limit: '10mb' }));
 
-// === 3. RATE LIMITER ===
+// ❌ JANGAN GUNAKAN /uploads UNTUK FILE LOCAL — HANYA UNTUK STATIS JIKA DIBUTUHKAN NANTI
+// app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); // KOMENTARI INI
+
 const loginLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000, 
+  windowMs: 10 * 60 * 1000,
   max: 10,
   message: 'Terlalu banyak percobaan login. Coba lagi nanti.',
   standardHeaders: true,
   legacyHeaders: false,
 });
-
-// Terapkan rate limiter HANYA untuk login
 app.use('/api/auth/login', loginLimiter);
 
-// === 4. ROUTES ===
 app.use('/api/auth', require('./routes/authRoutes'));
-app.use('/api', auth, activityLogger); // ✅ Benar
+app.use('/api', auth, activityLogger);
 app.use('/api/letters', require('./routes/letterRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
 app.use('/api/reports', require('./routes/reportRoutes'));
-app.use('/api/classifications', require('./routes/classificationRoutes')); 
-
-// 🔑 Tambahkan ini untuk history
+app.use('/api/classifications', require('./routes/classificationRoutes'));
 app.use('/api/history', require('./routes/historyRoutes'));
 
-// === 5. ROOT ROUTE (Duplikat /health untuk kemungkinan health check awal Railway) ===
 app.get('/', (req, res) => {
-  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() }); // ✅ Sama seperti /health
+  res.send('Backend surat MERN aktif!');
 });
 
-// Health check untuk Railway TAMBAHAN
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// === 6. JALANKAN SERVER ===
 app.listen(PORT, () => {
   console.log(`🚀 Server berjalan di port ${PORT}`);
 });
