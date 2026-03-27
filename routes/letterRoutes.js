@@ -7,25 +7,24 @@ const User = require('../models/User'); // ← tambahkan jika belum ada
 const auth = require('../middleware/auth');
 const admin = require('../middleware/admin');
 const archiver = require('archiver');
-const fs = require('fs'); // Tetap diperlukan untuk endpoint download dan logika lainnya
-
-// 🔧 INTEGRASI: Import dan Konfigurasi Cloudinary
-const cloudinary = require('cloudinary').v2;
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
+const fs = require('fs');
 
 const router = express.Router();
 
-// Setup multer untuk menyimpan file di memory (buffer)
-// Karena Cloudinary akan mengupload dari buffer
-const storage = multer.memoryStorage(); // Ganti dari diskStorage
+// Setup multer
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/');
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
 
 const upload = multer({
-  storage, // Gunakan storage baru
-  limits: { fileSize: 10 * 1024 * 1024 } // Batasi ukuran file
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }
 });
 
 // 🔑 1. Route ADMIN: lihat semua surat — filter unik berdasarkan suratId
@@ -51,13 +50,12 @@ router.get('/all', auth, admin, async (req, res) => {
   }
 });
 
-// 📤 2. Kirim surat (CREATE) - Buffer file akan ditangani oleh controller
+// 📤 2. Kirim surat (CREATE)
 router.post('/', auth, upload.single('arsipDigital'), async (req, res) => {
   try {
     const { createLetter } = require('../controllers/letterController');
-    return createLetter(req, res); // req.file.buffer siap diproses oleh controller
+    return createLetter(req, res);
   } catch (err) {
-    console.error('Gagal memanggil createLetter:', err);
     res.status(500).json({ message: 'Gagal mengirim surat.' });
   }
 });
@@ -208,11 +206,11 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
-// ✏️ 8. Edit surat (hanya pengirim atau admin) - Buffer file akan ditangani oleh controller
+// ✏️ 8. Edit surat (hanya pengirim atau admin)
 router.put('/:id', auth, upload.single('arsipDigital'), async (req, res) => {
   try {
     const { updateLetter } = require('../controllers/letterController');
-    return updateLetter(req, res); // req.file.buffer siap diproses oleh controller
+    return updateLetter(req, res);
   } catch (err) {
     console.error('Error update surat via route:', err);
     res.status(500).json({ message: 'Gagal memperbarui surat.' });
@@ -234,7 +232,7 @@ router.delete('/:id', auth, async (req, res) => {
 router.put('/admin/:id', auth, admin, upload.single('arsipDigital'), async (req, res) => {
   try {
     const { adminUpdateLetter } = require('../controllers/letterController');
-    return adminUpdateLetter(req, res); // req.file.buffer siap diproses oleh controller
+    return adminUpdateLetter(req, res);
   } catch (err) {
     console.error('Error admin update surat via route:', err);
     res.status(500).json({ message: 'Gagal memperbarui surat.' });
@@ -263,11 +261,7 @@ router.delete('/permanent/:id', auth, async (req, res) => {
   }
 });
 
-// ⬇️ 10. Unduh surat + metadata (ZIP) - Perlu Dimodifikasi untuk URL Cloudinary!
-// Saat ini, endpoint ini hanya akan bekerja jika 'letter.arsipDigital' adalah path lokal.
-// Jika 'letter.arsipDigital' adalah URL Cloudinary, 'fs.existsSync' dan 'archive.file' tidak akan berfungsi.
-// Anda perlu mengganti logika ini untuk mengambil file dari URL eksternal (misalnya menggunakan 'node-fetch' atau 'axios')
-// dan kemudian menambahkannya ke archiver dari buffer.
+// ⬇️ 10. Unduh surat + metadata (ZIP) - FIX KLASIFIKASI DI DOWNLOAD
 router.get('/:id/download', auth, async (req, res) => {
   try {
     let letter;
@@ -293,96 +287,49 @@ router.get('/:id/download', auth, async (req, res) => {
 
     if (!letter) return res.status(404).json({ message: 'Surat tidak ditemukan.' });
 
-    // --- LOGIKA DOWNLOAD YANG PERLU DIMODIFIKASI ---
-    // Jika letter.arsipDigital adalah URL Cloudinary, bagian ini akan gagal.
-    const isLocalFile = letter.arsipDigital && !letter.arsipDigital.startsWith('http'); // Sederhana: cek apakah lokal
+    
+    const uploadsDir = path.join(__dirname, '..', 'uploads');
+    const filePath = path.join(uploadsDir, path.basename(letter.arsipDigital));
 
-    if (isLocalFile) {
-      // --- Kode Eksisting untuk File Lokal ---
-      const filePath = path.join(process.cwd(), 'uploads', path.basename(letter.arsipDigital));
-
-      if (!fs.existsSync(filePath)) {
-        console.error('File tidak ditemukan (lokal):', filePath);
-        console.error('CWD saat ini:', process.cwd());
-        console.error('Path yang dicari:', filePath);
-        return res.status(404).json({ message: 'File arsip tidak ditemukan (lokal).' });
-      }
-
-      const originalFileName = path.basename(letter.arsipDigital);
-      const zipName = `surat_${letter.noSurat.replace(/\//g, '_')}.zip`;
-
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
-
-      const archive = archiver('zip', { zlib: { level: 9 } });
-      archive.pipe(res);
-
-      // Tambahkan file asli (lokal)
-      archive.file(filePath, { name: originalFileName });
-
-      // Tambahkan data surat - FIX KLASIFIKASI DI SINI
-      const dataText = `
-DATA SURAT
-==========
-No Urut            : ${letter.noUrut}
-No Surat           : ${letter.noSurat}
-Tanggal Terima     : ${new Date(letter.tanggalTerima).toLocaleDateString('id-ID')}
-Tanggal Disposisi  : ${letter.tanggalDisposisi ? new Date(letter.tanggalDisposisi).toLocaleDateString('id-ID') : '-'}
-Asal Surat         : ${letter.asalSurat}
-Perihal            : ${letter.perihal}
-Keterangan         : ${letter.keterangan}
-Tgl Disposisi Bidang: ${letter.tanggalDisposisiBidang ? new Date(letter.tanggalDisposisiBidang).toLocaleDateString('id-ID') : '-'}
-Jabatan            : ${letter.jabatan}
-Nama               : ${letter.nama}
-NIP                : ${letter.nip}
-Pengirim           : ${letter.pengirimId?.email || '–'}
-Penerima           : ${letter.penerimaId?.email || '–'}
-Klasifikasi        : ${letter.klasifikasiId?.nama || '–'}
-`;
-      archive.append(dataText, { name: 'data_surat.txt' });
-
-      await archive.finalize();
-    } else {
-      // --- Kode Baru untuk URL Cloudinary ---
-      // Untuk saat ini, hanya kirim metadata saja atau beri error jika file diperlukan.
-      // Implementasi pengambilan file dari URL Cloudinary dan penambahan ke ZIP
-      // memerlukan library tambahan seperti 'node-fetch' atau 'axios'.
-      console.warn('Download dengan file dari Cloudinary belum diimplementasikan sepenuhnya di endpoint ini.');
-
-      // Contoh: Kirim hanya metadata
-      const zipName = `surat_${letter.noSurat.replace(/\//g, '_')}_metadata.zip`;
-
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
-
-      const archive = archiver('zip', { zlib: { level: 9 } });
-      archive.pipe(res);
-
-      // Tambahkan data surat - FIX KLASIFIKASI DI SINI
-      const dataText = `
-DATA SURAT
-==========
-No Urut            : ${letter.noUrut}
-No Surat           : ${letter.noSurat}
-Tanggal Terima     : ${new Date(letter.tanggalTerima).toLocaleDateString('id-ID')}
-Tanggal Disposisi  : ${letter.tanggalDisposisi ? new Date(letter.tanggalDisposisi).toLocaleDateString('id-ID') : '-'}
-Asal Surat         : ${letter.asalSurat}
-Perihal            : ${letter.perihal}
-Keterangan         : ${letter.keterangan}
-Tgl Disposisi Bidang: ${letter.tanggalDisposisiBidang ? new Date(letter.tanggalDisposisiBidang).toLocaleDateString('id-ID') : '-'}
-Jabatan            : ${letter.jabatan}
-Nama               : ${letter.nama}
-NIP                : ${letter.nip}
-Pengirim           : ${letter.pengirimId?.email || '–'}
-Penerima           : ${letter.penerimaId?.email || '–'}
-Klasifikasi        : ${letter.klasifikasiId?.nama || '–'}
-File Arsip (URL): ${letter.arsipDigital || 'Tidak ada file'}
-`;
-      archive.append(dataText, { name: 'data_surat.txt' });
-
-      await archive.finalize();
+    if (!fs.existsSync(filePath)) {
+      console.error('File tidak ditemukan:', filePath);
+      return res.status(404).json({ message: 'File arsip tidak ditemukan.' });
     }
 
+    const originalFileName = path.basename(letter.arsipDigital);
+    const zipName = `surat_${letter.noSurat.replace(/\//g, '_')}.zip`;
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.pipe(res);
+
+    // Tambahkan file asli
+    archive.file(filePath, { name: originalFileName });
+
+    // Tambahkan data surat - FIX KLASIFIKASI DI SINI
+    const dataText = `
+DATA SURAT
+==========
+No Urut            : ${letter.noUrut}
+No Surat           : ${letter.noSurat}
+Tanggal Terima     : ${new Date(letter.tanggalTerima).toLocaleDateString('id-ID')}
+Tanggal Disposisi  : ${letter.tanggalDisposisi ? new Date(letter.tanggalDisposisi).toLocaleDateString('id-ID') : '-'}
+Asal Surat         : ${letter.asalSurat}
+Perihal            : ${letter.perihal}
+Keterangan         : ${letter.keterangan}
+Tgl Disposisi Bidang: ${letter.tanggalDisposisiBidang ? new Date(letterisiBidang).toLocaleDateString('id-ID') : '-'}
+Jabatan            : ${letter.jabatan}
+Nama               : ${letter.nama}
+NIP                : ${letter.nip}
+Pengirim           : ${letter.pengirimId?.email || '–'}
+Penerima           : ${letter.penerimaId?.email || '–'}
+Klasifikasi        : ${letter.klasifikasiId?.nama || '–'}  
+`;
+    archive.append(dataText, { name: 'data_surat.txt' });
+
+    await archive.finalize();
   } catch (err) {
     console.error('Error download:', err);
     res.status(500).json({ message: 'Gagal mengunduh surat.' });
